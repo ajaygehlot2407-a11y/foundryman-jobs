@@ -33,7 +33,11 @@ export default function Home() {
     load()
   },[])
   const open=rows.filter(v=>(v.live_status||v.status)==='Open').length
-  const urgent=rows.filter(v=>v.is_urgent || (daysLeft(v.last_date) >= 0 && daysLeft(v.last_date)<=7)).length
+  const urgent=rows.filter(v=>{
+    const live=v.live_status||v.status
+    const d=v.days_remaining??daysLeft(v.last_date)
+    return live==='Open' && d!==null && d>=0 && d<=7
+  }).length
   const verified=rows.filter(v=>String(v.verification_status||'').startsWith('Verified')).length
   const apprentices=rows.filter(v=>v.job_type==='Apprenticeship').length
   const rail=rows.filter(v=>/railway/i.test(v.organization||'')).length
