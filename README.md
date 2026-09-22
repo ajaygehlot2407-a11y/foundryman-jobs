@@ -1,29 +1,28 @@
-# Foundryman Jobs India V2
+# Foundryman Jobs India — V1
 
-Free-tier Next.js + Supabase vacancy intelligence portal for ITI Foundryman recruitment.
+Free-tier starter website for an India-wide ITI Foundryman vacancy portal.
 
-## V2 includes
-- Dashboard with live database statistics
-- Vacancy directory with search and filters
-- Vacancy detail pages
-- Official notification/apply links
-- Foundryman eligibility evidence
-- Source Registry page
-- Responsive mobile layout
-- Supabase `vacancy_dashboard` integration with fallback seed data
+## Stack
+- Next.js
+- React
+- Supabase PostgreSQL
+- Vercel Free tier compatible
 
-## Environment
-Copy `.env.example` to `.env.local` and set:
-- `NEXT_PUBLIC_SUPABASE_URL`
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY` (Supabase Publishable key is acceptable for the client variable)
+## Local setup
+1. Install Node.js 20+.
+2. Copy `.env.example` to `.env.local`.
+3. Put your Supabase project URL and anon/publishable key in `.env.local`.
+4. In Supabase SQL Editor, run `supabase-policies.sql` so the public site can read vacancy/source rows.
+5. Run:
 
-Never put a Supabase secret/service-role key in a `NEXT_PUBLIC_` variable or in GitHub.
-
-## Run
 ```bash
 npm install
 npm run dev
 ```
 
-## Deploy
-Push to GitHub and import the repository into Vercel. Add the two public client environment variables in Vercel.
+Open http://localhost:3000.
+
+## Important
+The app includes a small fallback dataset so the UI can be previewed before Supabase is connected. Once the Supabase view is accessible, the app uses `vacancy_dashboard` automatically.
+
+Do not put your Supabase service-role key in the browser or in `NEXT_PUBLIC_*` variables. Only the public anon/publishable key belongs in the frontend.
