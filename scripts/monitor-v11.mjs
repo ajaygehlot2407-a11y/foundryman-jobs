@@ -185,3 +185,77 @@ async function candidate({sourceId,runId,sourceName,organization="",url,title,te
   try{await post("vacancy_candidates",row,"candidate "+sourceName);return true;}
   catch(e){if(String(e).includes("23505")||String(e).toLowerCase().includes("duplicate"))return false;console.log("[CANDIDATE-ERROR]",sourceName,e.message);return false;}
 }
+
+function strategy(source){
+  const n=(source.source_name||"").toLowerCase(), t=(source.source_type||"").toLowerCase();
+  if(/railway|rrb|rrc/.test(n))return {pages:22,depth:4};
+  if(/psc|commission|selection board|employment/.test(n)||t.includes("employment"))return {pages:18,depth:4};
+  if(/bhel|hal|drdo|csir|spmcil|isro|defence|atomic|shipyard|psu/.test(n))return {pages:18,depth:4};
+  if(/apprenticeship|skill|dgt|iti/.test(n))return {pages:20,depth:4};
+  return {pages:14,depth:3};
+}
+
+async function processSource(source,run,state){
+  const urls=[source.recruitment_url,source.official_url].filter((u,i,a)=>http(u)&&a.indexOf(u)===i);
+  if(!urls.length){state.errors++;return;}
+  const st=strategy(source), q=[],seen=new Set(),queued=new Set(),hosts=new Set(urls.map(host)); 
+  const push=(url,title="",depth=0,isRoot=false)=>{if(!url||!http(url)||queued.has(url)||seen.has(url))return;const h=host(url);if(![...hosts].some(x=>h===x||h.endsWith("."+x)||x.endsWith("."+h)))return;queued.add(url);q.push({url,title,depth,isRoot});};
+  urls.forEach(u=>push(u,"Recruitment",0,true));
+  let pages=0,errors=0,warnings=0;
+  while(q.length&&pages<st.pages){
+    q.sort((a,b)=>(b.isRoot-a.isRoot)||(b.depth-a.depth?0:linkRank({text:b.title,url:b.url})-linkRank({text:a.title,url:a.url})));
+    const r=q.shift();if(seen.has(r.url))continue;seen.add(r.url);
+    try{
+      const got=await fetchUrl(r.url,r.isRoot?CFG.sourceTimeout:CFG.pageTimeout,`${source.source_name} ${r.url}`);
+      pages++;state.pages++;
+      const type=pdf(r.url)||/pdf/i.test(got.type)?"PDF":"HTML";
+      let title="",text="",links=[];
+      if(type==="PDF"){text=await extractPdf(got.buffer,got.url);title=decodeURIComponent(got.url.split("/").pop()||"PDF");}
+      else {const p=parseHtml(got.buffer.toString("utf8"),got.url);title=p.title||r.title;text=p.text;links=p.links;}
+      if(text)await candidate({sourceId:source.id,runId:run.id,sourceName:source.source_name,organization:source.organization,url:got.url,title,text,documentType:type,status:"Official Source",discoveryMethod:type==="PDF"?"official-targeted-pdf":"official-targeted-page",verificationUrl:got.url}).then(x=>{if(x)state.candidates++;});
+      if(type==="HTML"&&r.depth<st.depth){
+        for(const l of links.filter(crawlable).sort((a,b)=>linkRank(b)-linkRank(a)).slice(0,CFG.maxLinksPerPage))push(l.url,l.text,r.depth+1,false);
+      }
+    }catch(e){if(r.isRoot){errors++;state.errors++;}else{warnings++;state.warnings++;}}
+  }
+  try{await patch(`source_registry?id=eq.${encodeURIComponent(source.id)}`,{last_checked:new Date().toISOString(),last_status:errors?"Error":warnings?"OK with warnings":"OK",last_error:errors?`root access failure(s): ${errors}`:null},`source health ${source.source_name}`)}catch{}
+  console.log(`[SOURCE] ${source.source_name} pages=${pages} candidates=${state.candidates} errors=${errors} warnings=${warnings}`);
+}
+
+async function processAggregator(agg,run,state){
+  try{
+    const got=await fetchUrl(agg.url,CFG.sourceTimeout,agg.name);
+    const p=parseHtml(got.buffer.toString("utf8"),got.url);
+    const links=p.links.filter(crawlable).sort((a,b)=>linkRank(b)-linkRank(a)).slice(0,40);
+    for(const l of links){
+      try{
+        const g=await fetchUrl(l.url,CFG.pageTimeout,agg.name);
+        const type=pdf(l.url)||/pdf/i.test(g.type)?"PDF":"HTML";
+        let title=l.text||"",text="",outLinks=[];
+        if(type==="PDF"){text=await extractPdf(g.buffer,g.url);title=title||decodeURIComponent(g.url.split("/").pop()||"PDF");}
+        else{const x=parseHtml(g.buffer.toString("utf8"),g.url);title=x.title||title;text=x.text;outLinks=x.links;}
+        if(termsIn(`${title} ${g.url} ${text}`).length){
+          const official=outLinks.find(x=>/\.gov\.in$|\.nic\.in$|\.ac\.in$|\.edu\.in$|\.org\.in$/i.test(host(x.url))&&!/result|answer|admit|corrigendum|cancel/i.test(x.text+" "+x.url));
+          await candidate({sourceId:null,runId:run.id,sourceName:agg.name,organization:host(official?.url||g.url),url:official?.url||g.url,title,text,documentType:type,status:"Aggregator Discovery — Official verification required",discoveryMethod:"aggregator-discovery",verificationUrl:official?.url||""}).then(x=>{if(x)state.candidates++;});
+        }
+      }catch{}
+    }
+  }catch(e){state.warnings++;console.log("[AGGREGATOR]",agg.name,e.message);}
+}
+
+async function main(){
+  console.log("FOUNDRYMAN VACANCY MONITOR V11.0 — TARGETED DISCOVERY");
+  let sources=await get("source_registry?active=eq.true&select=*&order=priority.asc","load sources");
+  if(!Array.isArray(sources))throw new Error("source registry not array");
+  if(SOURCE_NAMES.length)sources=sources.filter(s=>SOURCE_NAMES.some(n=>(s.source_name||"").toLowerCase().includes(n)));
+  if(SOURCE_LIMIT>0)sources=sources.slice(0,SOURCE_LIMIT);
+  if(MODE==="official-test")sources=sources.slice(0,Math.min(sources.length,SOURCE_LIMIT||8));
+  const run0=await post("monitoring_runs",{started_at:new Date().toISOString(),status:"Running",sources_checked:0,pages_scanned:0,candidates_found:0,errors_count:0,notes:`V11.0 targeted discovery mode=${MODE}`},"create run");
+  const run=Array.isArray(run0)?run0[0]:run0;const state={pages:0,candidates:0,errors:0,warnings:0};
+  let idx=0;async function worker(){while(true){const i=idx++;if(i>=sources.length)return;await processSource(sources[i],run,state);}}
+  await Promise.all(Array.from({length:Math.min(CFG.concurrency,sources.length)},worker));
+  if(MODE!=="official-only"){for(const a of CFG.aggregators)await processAggregator(a,run,state);}
+  await patch(`monitoring_runs?id=eq.${encodeURIComponent(run.id)}`,{finished_at:new Date().toISOString(),status:"Completed",sources_checked:sources.length,pages_scanned:state.pages,candidates_found:state.candidates,errors_count:state.errors,notes:`V11.0 mode=${MODE}; pages=${state.pages}; candidates=${state.candidates}; errors=${state.errors}; warnings=${state.warnings}`}, "finish run");
+  console.log(JSON.stringify({checked:sources.length,pages:state.pages,candidates:state.candidates,errors:state.errors,warnings:state.warnings,mode:MODE}));
+}
+main().catch(e=>{console.error("[FATAL]",e);process.exit(1);});
