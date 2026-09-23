@@ -16,7 +16,10 @@ const adminCss = `
   .formHead h2{margin:0 0 6px;font-size:24px;color:#10232d}
   .formGrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}
   .formGrid label,.loginCard label{display:flex;flex-direction:column;gap:7px;font-size:13px;font-weight:700;color:#334952}
-  .formGrid .span2{grid-column:span 2}\n  input,select,textarea{width:100%;box-sizing:border-box;border:1px solid #cbd7d4;border-radius:10px;background:#fbfcfc;color:#10232d;padding:11px 12px;font:inherit;font-size:14px;outline:none;transition:border .15s,box-shadow .15s}\n  input:focus,select:focus,textarea:focus{border-color:#00866a;box-shadow:0 0 0 3px rgba(0,134,106,.12)}\n  textarea{resize:vertical;min-height:100px}
+  .formGrid .span2{grid-column:span 2}
+  input,select,textarea{width:100%;box-sizing:border-box;border:1px solid #cbd7d4;border-radius:10px;background:#fbfcfc;color:#10232d;padding:11px 12px;font:inherit;font-size:14px;outline:none;transition:border .15s,box-shadow .15s}
+  input:focus,select:focus,textarea:focus{border-color:#00866a;box-shadow:0 0 0 3px rgba(0,134,106,.12)}
+  textarea{resize:vertical;min-height:100px}
   .formActions{display:flex;justify-content:flex-end;margin-top:24px}
   .primaryBtn,.secondaryBtn,.tableActions button{border-radius:10px;padding:11px 16px;font-weight:800;cursor:pointer;border:1px solid transparent}
   .primaryBtn{background:#087f62;color:#fff}.primaryBtn:hover{background:#066b53}.primaryBtn:disabled{opacity:.55;cursor:not-allowed}
@@ -24,12 +27,18 @@ const adminCss = `
   .wideBtn{width:100%;margin-top:8px}
   .successBox,.errorBox{padding:13px 15px;border-radius:10px;margin-bottom:18px;font-size:14px}
   .successBox{background:#e8f7f1;color:#075c49;border:1px solid #b9e7d8}.errorBox{background:#fff0ef;color:#9d2f27;border:1px solid #f0c1bc}
-  .adminTableWrap{overflow:auto;border:1px solid #d9e1df;border-radius:14px}\n  table{width:100%;border-collapse:collapse;min-width:820px;background:#fff}\n  th{background:#f5f8f7;text-align:left;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#61747c;padding:13px 14px;border-bottom:1px solid #d9e1df}\n  td{padding:15px 14px;border-bottom:1px solid #e4e9e7;color:#314850;font-size:14px;vertical-align:middle}\n  tr:last-child td{border-bottom:0}td b{display:block;color:#10232d}td small{display:block;color:#7a898f;margin-top:4px}
+  .adminTableWrap{overflow:auto;border:1px solid #d9e1df;border-radius:14px}
+  table{width:100%;border-collapse:collapse;min-width:820px;background:#fff}
+  th{background:#f5f8f7;text-align:left;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#61747c;padding:13px 14px;border-bottom:1px solid #d9e1df}
+  td{padding:15px 14px;border-bottom:1px solid #e4e9e7;color:#314850;font-size:14px;vertical-align:middle}
+  tr:last-child td{border-bottom:0}td b{display:block;color:#10232d}td small{display:block;color:#7a898f;margin-top:4px}
   .tableActions{display:flex;gap:8px}.tableActions button{padding:8px 11px;background:#fff;border-color:#cbd7d4;color:#17303a}.tableActions button:hover{background:#f3f7f6}.tableActions .dangerBtn{color:#a52f28;border-color:#e6c4c0}.tableActions .dangerBtn:hover{background:#fff2f1}
   .loginCard{width:100%}.adminHint{margin-top:18px!important;font-size:13px!important}
   .empty{text-align:center;color:#60727b}
   @media(max-width:850px){.adminShell{padding:32px 16px 60px}.formGrid{grid-template-columns:1fr 1fr}.formGrid .span2{grid-column:span 2}.adminTop{align-items:flex-start;flex-direction:column}}
-  @media(max-width:560px){.formGrid{grid-template-columns:1fr}.formGrid .span2{grid-column:span 1}.adminCard{padding:20px}.formHead{flex-direction:column}}\n`\n
+  @media(max-width:560px){.formGrid{grid-template-columns:1fr}.formGrid .span2{grid-column:span 1}.adminCard{padding:20px}.formHead{flex-direction:column}}
+`
+
 const emptyForm = {
   vacancy_id: '', organization: '', department: '', post: '', recruitment: '', notification_number: '',
   vacancy_count: '', state: '', location: '', job_type: 'Permanent', eligibility: 'ITI Foundryman',
