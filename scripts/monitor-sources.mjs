@@ -1,241 +1,267 @@
-import crypto from "crypto";
-import fs from "fs";
-import os from "os";
-import path from "path";
-import { execFileSync } from "child_process";
+import crypto from "node:crypto";
+import { spawn } from "node:child_process";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
   process.exit(1);
 }
 
-const API = `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1`;
+const REST_URL = `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1`;
 
-const HEADERS = {
-  apikey: SERVICE_ROLE_KEY,
-  Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
-  "Content-Type": "application/json"
+const CONFIG = {
+  MAX_PAGES_PER_SOURCE: 6,
+  MAX_LINKS_PER_PAGE: 80,
+  MAX_PDF_BYTES: 20 * 1024 * 1024,
+
+  SOURCE_TIMEOUT_MS: 30000,
+  PAGE_TIMEOUT_MS: 25000,
+  CURL_TIMEOUT_SECONDS: 35,
+
+  SOURCE_RETRIES: 3,
+  PAGE_RETRIES: 2,
+
+  CONCURRENCY: 4,
+
+  USER_AGENT:
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/131.0 Safari/537.36 " +
+    "FoundrymanJobsMonitor/10.1",
+
+  DISCOVERY_TERMS: [
+    "foundryman",
+    "foundry man",
+    "moulder",
+    "molder",
+    "foundry worker",
+    "foundry trade",
+    "foundry",
+  ],
+
+  STRONG_TERMS: [
+    "foundryman",
+    "foundry man",
+    "moulder",
+    "molder",
+  ],
+
+  MEDIUM_TERMS: [
+    "foundry worker",
+    "foundry trade",
+  ],
+
+  RECRUITMENT_TERMS: [
+    "recruitment",
+    "recruit",
+    "vacancy",
+    "vacancies",
+    "career",
+    "careers",
+    "job",
+    "jobs",
+    "advertisement",
+    "advt",
+    "notification",
+    "notice",
+    "engagement",
+    "selection",
+    "apprentice",
+    "apprenticeship",
+    "application",
+    "employment",
+    "result",
+    "trade",
+    "iti",
+  ],
+
+  QUALIFICATION_TERMS: [
+    "iti",
+    "ncvt",
+    "scvt",
+    "ntc",
+    "nac",
+    "trade qualification",
+    "technical qualification",
+    "industrial training institute",
+  ],
+
+  DEADLINE_PATTERNS: [
+    /last\s+date.{0,120}/i,
+    /closing\s+date.{0,120}/i,
+    /application\s+deadline.{0,120}/i,
+    /apply\s+(?:online\s+)?(?:before|by).{0,120}/i,
+    /applications?\s+(?:are\s+)?(?:invited|accepted).{0,160}/i,
+  ],
 };
 
-const MAX_PAGES_PER_SOURCE = 5;
-const MAX_LINKS_PER_PAGE = 60;
-const MAX_PDF_BYTES = 15 * 1024 * 1024;
-const REQUEST_TIMEOUT = 25000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const DISCOVERY_TERMS = [
-  "foundryman",
-  "foundry man",
-  "moulder",
-  "molder",
-  "foundry worker",
-  "foundry trade",
-  "foundry"
-];
-
-const CONTEXT_TERMS = [
-  "foundryman",
-  "foundry man",
-  "moulder",
-  "molder",
-  "foundry worker",
-  "foundry trade",
-  "foundry"
-];
-
-const RECRUITMENT_TERMS = [
-  "recruitment",
-  "recruitment notice",
-  "recruitment notification",
-  "vacancy",
-  "vacancies",
-  "career",
-  "careers",
-  "job",
-  "jobs",
-  "advertisement",
-  "advt",
-  "notification",
-  "notice",
-  "apprentice",
-  "apprenticeship",
-  "engagement",
-  "selection",
-  "trade test",
-  "technical"
-];
-
-const HIGH_CONFIDENCE_TERMS = [
-  "foundryman",
-  "foundry man",
-  "moulder",
-  "molder"
-];
-
-const MEDIUM_CONFIDENCE_TERMS = [
-  "foundry worker",
-  "foundry trade"
-];
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function cleanText(value) {
-  return String(value || "")
+function cleanText(value = "") {
+  return String(value)
+    .replace(/\u00a0/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function normalize(value) {
-  return cleanText(value).toLowerCase();
-}
-
-function sha256(value) {
-  return crypto
-    .createHash("sha256")
-    .update(String(value || ""))
-    .digest("hex");
+function truncate(value, max = 1200) {
+  const text = cleanText(value);
+  return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
 function formatError(error) {
   if (!error) return "Unknown error";
 
-  return cleanText(
-    error?.stack ||
-    error?.message ||
-    error?.toString() ||
-    "Unknown error"
-  ).slice(0, 1000);
-}
-
-function sameHost(a, b) {
-  try {
-    return new URL(a).hostname === new URL(b).hostname;
-  } catch {
-    return false;
+  if (error.name === "AbortError") {
+    return "timeout";
   }
+
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message}`.slice(0, 1000);
+  }
+
+  return String(error).slice(0, 1000);
 }
 
-function absoluteUrl(href, base) {
+function isPdfUrl(url = "") {
+  const clean = url.split("?")[0].split("#")[0].toLowerCase();
+  return clean.endsWith(".pdf");
+}
+
+function isHttpUrl(url) {
+  return /^https?:\/\//i.test(url);
+}
+
+function normalizeUrl(url, baseUrl) {
   try {
-    return new URL(href, base).href;
+    return new URL(url, baseUrl).href;
   } catch {
     return null;
   }
 }
 
-function isPdf(url) {
-  return /\.pdf(?:$|[?#])/i.test(url);
-}
-
-function isAllowedOfficialHost(url) {
+function sameHost(urlA, urlB) {
   try {
-    const host = new URL(url).hostname.toLowerCase();
-
-    return (
-      /\.gov\.in$/.test(host) ||
-      /\.nic\.in$/.test(host) ||
-      /\.ac\.in$/.test(host) ||
-      /\.edu\.in$/.test(host) ||
-      /\.org\.in$/.test(host) ||
-      host === "gov.in" ||
-      host === "nic.in"
-    );
+    return new URL(urlA).hostname.toLowerCase() ===
+      new URL(urlB).hostname.toLowerCase();
   } catch {
     return false;
   }
 }
 
-function containsAny(text, terms) {
-  const value = normalize(text);
-  return terms.some(term => value.includes(term));
+function normalizeHost(hostname) {
+  return hostname
+    .toLowerCase()
+    .replace(/^www\./, "")
+    .trim();
 }
 
-function extractMatchedKeywords(text) {
-  const value = normalize(text);
+/*
+ * IMPORTANT:
+ * Do NOT restrict official sources to .gov.in/.nic.in only.
+ *
+ * Indian PSUs and government organizations may legitimately use:
+ * .com
+ * .co.in
+ * .org
+ * .in
+ * specialized institutional domains
+ *
+ * We therefore use the source's own hostname as the boundary.
+ */
+function sameOfficialSite(url, sourceUrl) {
+  try {
+    const a = normalizeHost(new URL(url).hostname);
+    const b = normalizeHost(new URL(sourceUrl).hostname);
 
-  return [...new Set(
-    DISCOVERY_TERMS.filter(term => value.includes(term))
-  )];
+    return a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
+  } catch {
+    return false;
+  }
 }
 
-function confidenceFor(text) {
-  const value = normalize(text);
+function makeFingerprint(sourceId, url, title) {
+  return crypto
+    .createHash("sha256")
+    .update(
+      `${sourceId}|${url.trim().toLowerCase()}|${cleanText(title).toLowerCase()}`
+    )
+    .digest("hex");
+}
+
+function makeContentHash(text) {
+  return crypto
+    .createHash("sha256")
+    .update(cleanText(text))
+    .digest("hex");
+}
+
+function scoreText(text) {
+  const lower = cleanText(text).toLowerCase();
 
   let score = 0;
 
-  if (HIGH_CONFIDENCE_TERMS.some(t => value.includes(t))) {
+  if (CONFIG.STRONG_TERMS.some((term) => lower.includes(term))) {
     score += 80;
   }
 
-  if (MEDIUM_CONFIDENCE_TERMS.some(t => value.includes(t))) {
+  if (CONFIG.MEDIUM_TERMS.some((term) => lower.includes(term))) {
     score += 60;
   }
 
-  if (value.includes("foundry")) {
-    score += 15;
-  }
-
-  if (value.includes("iti")) {
-    score += 5;
-  }
-
-  if (value.includes("trade")) {
-    score += 5;
-  }
+  if (lower.includes("foundry")) score += 15;
+  if (lower.includes("iti")) score += 5;
+  if (lower.includes("trade")) score += 5;
 
   return Math.min(score, 100);
 }
 
+function findMatchedKeywords(text) {
+  const lower = cleanText(text).toLowerCase();
+
+  return CONFIG.DISCOVERY_TERMS.filter((term) =>
+    lower.includes(term)
+  );
+}
+
 function extractContext(text) {
-  const compact = cleanText(text);
-  const lower = compact.toLowerCase();
+  const clean = cleanText(text);
+  const lower = clean.toLowerCase();
 
   let bestIndex = -1;
-  let bestTerm = "";
+  let matchedTerm = "";
 
-  for (const term of CONTEXT_TERMS) {
+  for (const term of CONFIG.DISCOVERY_TERMS) {
     const index = lower.indexOf(term);
 
-    if (index >= 0 && (bestIndex < 0 || index < bestIndex)) {
+    if (index !== -1 && (bestIndex === -1 || index < bestIndex)) {
       bestIndex = index;
-      bestTerm = term;
+      matchedTerm = term;
     }
   }
 
-  if (bestIndex < 0) {
+  if (bestIndex === -1) {
     return "";
   }
 
-  const start = Math.max(0, bestIndex - 300);
-  const end = Math.min(
-    compact.length,
-    bestIndex + bestTerm.length + 500
-  );
+  const start = Math.max(0, bestIndex - 500);
+  const end = Math.min(clean.length, bestIndex + 1000);
 
-  return compact.slice(start, end);
+  return truncate(
+    `[matched: ${matchedTerm}] ${clean.slice(start, end)}`,
+    1600
+  );
 }
 
 function extractDeadline(text) {
-  const value = cleanText(text);
+  const clean = cleanText(text);
 
-  const patterns = [
-    /last\s+date.{0,100}/i,
-    /last\s+date\s+of\s+application.{0,100}/i,
-    /closing\s+date.{0,100}/i,
-    /apply\s+before.{0,100}/i,
-    /application\s+deadline.{0,100}/i,
-    /applications?\s+must\s+be\s+submitted.{0,100}/i
-  ];
-
-  for (const pattern of patterns) {
-    const match = value.match(pattern);
+  for (const pattern of CONFIG.DEADLINE_PATTERNS) {
+    const match = clean.match(pattern);
 
     if (match) {
-      return match[0].slice(0, 250);
+      return truncate(match[0], 500);
     }
   }
 
@@ -243,336 +269,664 @@ function extractDeadline(text) {
 }
 
 function extractQualification(text) {
-  const value = cleanText(text);
+  const clean = cleanText(text);
+  const lower = clean.toLowerCase();
 
-  const patterns = [
-    /ITI.{0,250}/i,
-    /Industrial Training Institute.{0,250}/i,
-    /NCVT.{0,250}/i,
-    /SCVT.{0,250}/i,
-    /National Apprenticeship Certificate.{0,250}/i,
-    /NAC.{0,250}/i,
-    /NTC.{0,250}/i,
-    /trade qualification.{0,250}/i,
-    /technical qualification.{0,250}/i
-  ];
+  let firstIndex = -1;
 
-  for (const pattern of patterns) {
-    const match = value.match(pattern);
+  for (const term of CONFIG.QUALIFICATION_TERMS) {
+    const index = lower.indexOf(term);
 
-    if (match) {
-      return match[0].slice(0, 500);
+    if (index !== -1 && (firstIndex === -1 || index < firstIndex)) {
+      firstIndex = index;
     }
   }
 
-  return "";
-}
-
-function extractLinks(html, pageUrl) {
-  const results = [];
-  const regex = /<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-
-  let match;
-
-  while ((match = regex.exec(html)) !== null) {
-    const href = match[1];
-    const rawTitle = match[2]
-      .replace(/<[^>]+>/g, " ")
-      .replace(/&nbsp;/gi, " ");
-
-    const title = cleanText(rawTitle);
-    const url = absoluteUrl(href, pageUrl);
-
-    if (!url) continue;
-
-    results.push({
-      url,
-      title
-    });
+  if (firstIndex === -1) {
+    return "";
   }
 
-  return results;
+  const start = Math.max(0, firstIndex - 300);
+  const end = Math.min(clean.length, firstIndex + 1000);
+
+  return truncate(clean.slice(start, end), 1400);
 }
 
-function pageText(html) {
-  return cleanText(
+function detectDocumentType(url, contentType = "") {
+  const type = String(contentType).toLowerCase();
+
+  if (isPdfUrl(url) || type.includes("application/pdf")) {
+    return "PDF";
+  }
+
+  if (type.includes("html")) {
+    return "HTML";
+  }
+
+  if (type) {
+    return type.split(";")[0];
+  }
+
+  return "Unknown";
+}
+
+function parseHtml(html, pageUrl) {
+  const titleMatch =
+    html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+
+  const title = cleanText(
+    titleMatch ? titleMatch[1].replace(/<[^>]+>/g, " ") : ""
+  );
+
+  const text = cleanText(
     html
       .replace(/<script[\s\S]*?<\/script>/gi, " ")
       .replace(/<style[\s\S]*?<\/style>/gi, " ")
       .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+      .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
       .replace(/<[^>]+>/g, " ")
-      .replace(/&nbsp;/gi, " ")
-      .replace(/&amp;/gi, "&")
   );
+
+  const links = [];
+
+  const anchorRegex =
+    /<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+
+  let match;
+
+  while ((match = anchorRegex.exec(html)) !== null) {
+    const href = normalizeUrl(match[1], pageUrl);
+
+    if (!href || !isHttpUrl(href)) {
+      continue;
+    }
+
+    const linkText = cleanText(
+      match[2].replace(/<[^>]+>/g, " ")
+    );
+
+    links.push({
+      url: href,
+      text: linkText,
+    });
+
+    if (links.length >= CONFIG.MAX_LINKS_PER_PAGE) {
+      break;
+    }
+  }
+
+  return {
+    title,
+    text,
+    links,
+  };
 }
 
-async function fetchWithTimeout(url, options = {}) {
+async function fetchWithNode(url, timeoutMs) {
   const controller = new AbortController();
 
-  const timeout = setTimeout(
+  const timer = setTimeout(
     () => controller.abort(),
-    REQUEST_TIMEOUT
+    timeoutMs
   );
 
   try {
-    return await fetch(url, {
-      ...options,
-      signal: controller.signal,
+    const response = await fetch(url, {
+      method: "GET",
       redirect: "follow",
+      signal: controller.signal,
+
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 Foundryman-Jobs-India-Monitor/10.0",
+        "User-Agent": CONFIG.USER_AGENT,
         Accept:
-          "text/html,application/xhtml+xml,application/pdf,*/*",
-        ...(options.headers || {})
-      }
+          "text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-IN,en;q=0.9",
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache",
+      },
     });
+
+    const contentType =
+      response.headers.get("content-type") || "";
+
+    const finalUrl = response.url || url;
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      finalUrl,
+      contentType,
+      buffer,
+      method: "node-fetch",
+    };
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(timer);
   }
 }
 
-async function fetchText(url) {
-  let lastError;
+function runCurl(url) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "-L",
+      "--compressed",
+      "--silent",
+      "--show-error",
+      "--fail-with-body",
+      "--connect-timeout",
+      "12",
+      "--max-time",
+      String(CONFIG.CURL_TIMEOUT_SECONDS),
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const response = await fetchWithTimeout(url);
+      "-A",
+      CONFIG.USER_AGENT,
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+      "-H",
+      "Accept: text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8",
+
+      "-H",
+      "Accept-Language: en-IN,en;q=0.9",
+
+      "-w",
+      "\n__HTTP_STATUS__:%{http_code}\n__CONTENT_TYPE__:%{content_type}\n__FINAL_URL__:%{url_effective}\n",
+
+      url,
+    ];
+
+    const child = spawn("curl", args);
+
+    const chunks = [];
+    const errors = [];
+
+    child.stdout.on("data", (data) => chunks.push(data));
+    child.stderr.on("data", (data) => errors.push(data));
+
+    child.on("error", reject);
+
+    child.on("close", (code) => {
+      const stdout = Buffer.concat(chunks);
+      const stderr = Buffer.concat(errors).toString("utf8");
+
+      if (code !== 0 && stdout.length === 0) {
+        reject(
+          new Error(
+            `curl exit ${code}: ${truncate(stderr, 500)}`
+          )
+        );
+        return;
       }
 
-      return await response.text();
+      const text = stdout.toString("utf8");
+
+      const statusMatch = text.match(
+        /\n__HTTP_STATUS__:(\d+)\s*$/m
+      );
+
+      const contentTypeMatch = text.match(
+        /\n__CONTENT_TYPE__:(.*?)\s*$/m
+      );
+
+      const finalUrlMatch = text.match(
+        /\n__FINAL_URL__:(.*?)\s*$/m
+      );
+
+      let bodyEnd = text.length;
+
+      for (const marker of [
+        "\n__HTTP_STATUS__:",
+        "\n__CONTENT_TYPE__:",
+        "\n__FINAL_URL__:",
+      ]) {
+        const index = text.indexOf(marker);
+
+        if (index !== -1) {
+          bodyEnd = Math.min(bodyEnd, index);
+        }
+      }
+
+      const body = Buffer.from(text.slice(0, bodyEnd));
+
+      const status = statusMatch
+        ? Number(statusMatch[1])
+        : 0;
+
+      resolve({
+        ok: status >= 200 && status < 400,
+        status,
+        statusText: "",
+        finalUrl: finalUrlMatch
+          ? finalUrlMatch[1].trim()
+          : url,
+        contentType: contentTypeMatch
+          ? contentTypeMatch[1].trim()
+          : "",
+        buffer: body,
+        method: "curl",
+      });
+    });
+  });
+}
+
+async function fetchResource(
+  url,
+  timeoutMs,
+  retries,
+  label
+) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const result = await fetchWithNode(url, timeoutMs);
+
+      if (
+        result.ok &&
+        result.buffer &&
+        result.buffer.length > 0
+      ) {
+        return result;
+      }
+
+      lastError = new Error(
+        `HTTP ${result.status} ${result.statusText || ""}`.trim()
+      );
+
+      console.log(
+        `[HTTP] ${label} attempt ${attempt}/${retries}: ${lastError.message}`
+      );
     } catch (error) {
       lastError = error;
 
-      if (attempt < 3) {
-        console.log(
-          `[RETRY] ${url} attempt=${attempt + 1}`
-        );
-        await sleep(1000 * attempt);
-      }
+      console.log(
+        `[NODE-ERROR] ${label} attempt ${attempt}/${retries}: ${formatError(error)}`
+      );
+    }
+
+    if (attempt < retries) {
+      await sleep(1000 * attempt);
     }
   }
 
-  throw lastError;
-}
-
-async function fetchBinary(url) {
-  const response = await fetchWithTimeout(url);
-
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-
-  const buffer = Buffer.from(await response.arrayBuffer());
-
-  if (buffer.length > MAX_PDF_BYTES) {
-    throw new Error(
-      `PDF exceeds ${MAX_PDF_BYTES} byte limit`
-    );
-  }
-
-  return buffer;
-}
-
-function extractPdfText(buffer) {
-  const tempDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), "foundryman-pdf-")
-  );
-
-  const pdfPath = path.join(tempDir, "document.pdf");
-  const txtPath = path.join(tempDir, "document.txt");
+  console.log(`[CURL] ${label}: trying curl fallback`);
 
   try {
-    fs.writeFileSync(pdfPath, buffer);
+    const result = await runCurl(url);
 
-    execFileSync(
-      "pdftotext",
-      ["-layout", pdfPath, txtPath],
-      {
-        timeout: 30000,
-        maxBuffer: 20 * 1024 * 1024
-      }
+    if (
+      result.ok &&
+      result.buffer &&
+      result.buffer.length > 0
+    ) {
+      console.log(`[CURL-OK] ${label}`);
+      return result;
+    }
+
+    lastError = new Error(
+      `curl HTTP ${result.status || "unknown"}`
     );
+  } catch (error) {
+    lastError = error;
 
-    return fs.readFileSync(txtPath, "utf8");
-  } finally {
+    console.log(
+      `[CURL-ERROR] ${label}: ${formatError(error)}`
+    );
+  }
+
+  throw lastError || new Error("fetch failed");
+}
+
+async function fetchSupabaseJson(
+  path,
+  options = {},
+  label = "Supabase API"
+) {
+  const url = `${REST_URL}/${path}`;
+
+  const headers = {
+    apikey: SUPABASE_SERVICE_ROLE_KEY,
+    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    "User-Agent": "FoundrymanJobsMonitor/10.1",
+    ...(options.headers || {}),
+  };
+
+  const method = options.method || "GET";
+  const body =
+    options.body !== undefined
+      ? JSON.stringify(options.body)
+      : undefined;
+
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      fs.rmSync(tempDir, {
-        recursive: true,
-        force: true
+      const response = await fetch(url, {
+        method,
+        headers,
+        body,
+        redirect: "follow",
       });
-    } catch {}
-  }
-}
 
-async function api(pathname, options = {}) {
-  const response = await fetchWithTimeout(
-    `${API}${pathname}`,
-    {
-      ...options,
-      headers: {
-        ...HEADERS,
-        ...(options.headers || {})
+      const raw = await response.text();
+
+      if (!response.ok) {
+        let details = "";
+
+        if (raw.trim()) {
+          try {
+            const parsed = JSON.parse(raw);
+
+            details =
+              parsed?.message ||
+              parsed?.error ||
+              parsed?.hint ||
+              JSON.stringify(parsed);
+          } catch {
+            details = truncate(raw, 500);
+          }
+        }
+
+        throw new Error(
+          `${label}: HTTP ${response.status} ${response.statusText}` +
+          `${details ? ` - ${details}` : ""}`
+        );
+      }
+
+      if (!raw.trim()) {
+        return null;
+      }
+
+      const contentType =
+        response.headers.get("content-type") || "";
+
+      if (!contentType.toLowerCase().includes("json")) {
+        console.log(
+          `[SUPABASE-WARN] ${label}: non-JSON response received`
+        );
+
+        return null;
+      }
+
+      try {
+        return JSON.parse(raw);
+      } catch (error) {
+        throw new Error(
+          `${label}: invalid JSON response: ${formatError(error)}`
+        );
+      }
+    } catch (error) {
+      lastError = error;
+
+      console.log(
+        `[SUPABASE] ${label} attempt ${attempt}/3 failed: ${formatError(error)}`
+      );
+
+      if (attempt < 3) {
+        await sleep(800 * attempt);
       }
     }
+  }
+
+  throw lastError || new Error(`${label}: unknown API failure`);
+}
+
+async function supabaseGet(path, label) {
+  return fetchSupabaseJson(path, {}, label);
+}
+
+async function supabasePost(path, body, label) {
+  return fetchSupabaseJson(
+    path,
+    {
+      method: "POST",
+      body,
+      headers: {
+        Prefer: "return=representation",
+      },
+    },
+    label
   );
+}
 
-  const text = await response.text();
+async function supabasePatch(path, body, label) {
+  return fetchSupabaseJson(
+    path,
+    {
+      method: "PATCH",
+      body,
+      headers: {
+        Prefer: "return=minimal",
+      },
+    },
+    label
+  );
+}
 
-  if (!response.ok) {
+function shouldCrawlLink(link) {
+  const combined =
+    `${link.text || ""} ${link.url || ""}`.toLowerCase();
+
+  return CONFIG.RECRUITMENT_TERMS.some((term) =>
+    combined.includes(term)
+  );
+}
+
+function shouldInspectPage(page) {
+  const combined =
+    `${page.title || ""} ${page.text || ""}`.toLowerCase();
+
+  return (
+    CONFIG.DISCOVERY_TERMS.some((term) =>
+      combined.includes(term)
+    ) ||
+    CONFIG.RECRUITMENT_TERMS.some((term) =>
+      combined.includes(term)
+    )
+  );
+}
+
+async function extractPdf(buffer, url) {
+  if (!buffer || buffer.length === 0) {
+    return {
+      text: "",
+      title: "",
+    };
+  }
+
+  if (buffer.length > CONFIG.MAX_PDF_BYTES) {
     throw new Error(
-      `Supabase HTTP ${response.status}: ${text.slice(0, 1000)}`
+      `PDF exceeds ${CONFIG.MAX_PDF_BYTES} byte limit`
     );
   }
 
-  if (!text.trim()) {
-    return null;
-  }
+  const tempFile =
+    `/tmp/foundryman-${crypto.randomUUID()}.pdf`;
+
+  const fs = await import("node:fs/promises");
+
+  await fs.writeFile(tempFile, buffer);
 
   try {
-    return JSON.parse(text);
-  } catch {
-    return text;
+    const text = await new Promise((resolve, reject) => {
+      const child = spawn("pdftotext", [
+        "-layout",
+        tempFile,
+        "-",
+      ]);
+
+      const chunks = [];
+      const errors = [];
+
+      child.stdout.on("data", (data) => chunks.push(data));
+      child.stderr.on("data", (data) => errors.push(data));
+
+      child.on("error", reject);
+
+      child.on("close", (code) => {
+        if (code !== 0) {
+          reject(
+            new Error(
+              `pdftotext exit ${code}: ${truncate(
+                Buffer.concat(errors).toString("utf8"),
+                500
+              )}`
+            )
+          );
+          return;
+        }
+
+        resolve(
+          Buffer.concat(chunks).toString("utf8")
+        );
+      });
+    });
+
+    return {
+      text: cleanText(text),
+      title: url.split("/").pop() || "PDF document",
+    };
+  } finally {
+    await fs.rm(tempFile, { force: true }).catch(() => {});
   }
 }
 
-async function loadSources() {
-  return await api(
-    "/source_registry?active=eq.true&select=*&order=priority.asc"
-  );
-}
-
-async function createMonitoringRun() {
-  const result = await api(
-    "/monitoring_runs",
-    {
-      method: "POST",
-      headers: {
-        Prefer: "return=representation"
-      },
-      body: JSON.stringify({
-        started_at: new Date().toISOString(),
-        sources_checked: 0,
-        pages_scanned: 0,
-        candidates_found: 0,
-        errors_count: 0,
-        status: "Running",
-        notes: "V10 HTML + PDF document monitor"
-      })
-    }
-  );
-
-  return Array.isArray(result) ? result[0] : result;
-}
-
-async function updateRun(runId, data) {
-  await api(
-    `/monitoring_runs?id=eq.${encodeURIComponent(runId)}`,
-    {
-      method: "PATCH",
-      body: JSON.stringify(data)
-    }
-  );
-}
-
-async function updateSource(sourceId, data) {
-  await api(
-    `/source_registry?id=eq.${encodeURIComponent(sourceId)}`,
-    {
-      method: "PATCH",
-      body: JSON.stringify(data)
-    }
-  );
-}
-
-async function existingFingerprint(fingerprint) {
-  const rows = await api(
-    `/vacancy_candidates?fingerprint=eq.${encodeURIComponent(
-      fingerprint
-    )}&select=id,duplicate_of_vacancy_id&limit=1`
-  );
-
-  return Array.isArray(rows) && rows.length
-    ? rows[0]
-    : null;
-}
-
-async function insertCandidate(payload) {
-  return await api(
-    "/vacancy_candidates",
-    {
-      method: "POST",
-      headers: {
-        Prefer: "return=minimal"
-      },
-      body: JSON.stringify(payload)
-    }
-  );
-}
-
-function candidateFingerprint(sourceId, url, title) {
-  return sha256(
-    `${sourceId}|${normalize(url)}|${normalize(title)}`
-  );
-}
-
-async function processDocument({
+async function processResource(
+  resource,
   source,
-  runId,
+  state
+) {
+  const resourceUrl = resource.url;
+
+  const result = await fetchResource(
+    resourceUrl,
+    resource.isSource
+      ? CONFIG.SOURCE_TIMEOUT_MS
+      : CONFIG.PAGE_TIMEOUT_MS,
+    resource.isSource
+      ? CONFIG.SOURCE_RETRIES
+      : CONFIG.PAGE_RETRIES,
+    `${source.source_name} -> ${resourceUrl}`
+  );
+
+  state.pagesScanned += 1;
+
+  const documentType = detectDocumentType(
+    resourceUrl,
+    result.contentType
+  );
+
+  let title = "";
+  let text = "";
+  let links = [];
+
+  if (documentType === "PDF") {
+    const extracted = await extractPdf(
+      result.buffer,
+      result.finalUrl || resourceUrl
+    );
+
+    title = extracted.title;
+    text = extracted.text;
+  } else {
+    const html = result.buffer.toString("utf8");
+
+    const parsed = parseHtml(
+      html,
+      result.finalUrl || resourceUrl
+    );
+
+    title = parsed.title;
+    text = parsed.text;
+    links = parsed.links;
+  }
+
+  if (!text) {
+    return {
+      title,
+      text: "",
+      links: [],
+      finalUrl: result.finalUrl || resourceUrl,
+      documentType,
+    };
+  }
+
+  const matchedKeywords = findMatchedKeywords(text);
+
+  if (matchedKeywords.length > 0) {
+    await maybeCreateCandidate({
+      source,
+      state,
+      url: result.finalUrl || resourceUrl,
+      title: title || resource.title || source.source_name,
+      text,
+      matchedKeywords,
+      documentType,
+    });
+  }
+
+  return {
+    title,
+    text,
+    links,
+    finalUrl: result.finalUrl || resourceUrl,
+    documentType,
+  };
+}
+
+async function maybeCreateCandidate({
+  source,
+  state,
   url,
   title,
   text,
-  documentType
+  matchedKeywords,
+  documentType,
 }) {
-  const cleaned = cleanText(text);
+  const score = scoreText(text);
 
-  if (!cleaned) return false;
+  /*
+   * Ignore weak generic "foundry" mentions unless there is
+   * recruitment context. This prevents menus/footer text from
+   * generating useless candidates.
+   */
+  const recruitmentContext =
+    CONFIG.RECRUITMENT_TERMS.some((term) =>
+      cleanText(text).toLowerCase().includes(term)
+    );
 
-  if (!containsAny(cleaned, DISCOVERY_TERMS)) {
-    return false;
+  if (
+    score < 60 &&
+    !recruitmentContext
+  ) {
+    return;
   }
 
-  const matchedKeywords = extractMatchedKeywords(cleaned);
-
-  const context = extractContext(cleaned);
-
-  const confidence = confidenceFor(
-    `${title} ${cleaned.slice(0, 15000)}`
-  );
-
-  const deadline = extractDeadline(cleaned);
-
-  const qualification = extractQualification(cleaned);
-
-  const fingerprint = candidateFingerprint(
+  const fingerprint = makeFingerprint(
     source.id,
     url,
     title
   );
 
-  const contentHash = sha256(
-    cleaned.slice(0, 100000)
-  );
-
-  const duplicate = await existingFingerprint(
-    fingerprint
-  );
-
-  if (duplicate) {
-    return false;
+  if (state.fingerprints.has(fingerprint)) {
+    return;
   }
 
-  const payload = {
+  state.fingerprints.add(fingerprint);
+
+  const contentHash = makeContentHash(text);
+
+  const candidate = {
     source_id: source.id,
-    monitoring_run_id: runId,
+    monitoring_run_id: state.runId,
     discovered_at: new Date().toISOString(),
 
     title:
-      cleanText(title) ||
-      "Foundryman-related recruitment document",
+      truncate(title, 500) ||
+      source.source_name ||
+      "Foundryman-related opportunity",
 
     url,
 
@@ -580,7 +934,8 @@ async function processDocument({
       matchedKeywords.join(", "),
 
     snippet:
-      context.slice(0, 1000),
+      extractContext(text) ||
+      truncate(text, 1000),
 
     source_status:
       "Official Source",
@@ -591,311 +946,421 @@ async function processDocument({
     review_status:
       "Pending Review",
 
-    duplicate_of_vacancy_id:
-      null,
-
     fingerprint,
 
-    document_type:
-      documentType,
+    document_type: documentType,
 
     matched_context:
-      context,
+      extractContext(text),
 
     confidence_score:
-      confidence,
+      score,
 
     deadline_text:
-      deadline,
+      extractDeadline(text),
 
     qualification_text:
-      qualification,
+      extractQualification(text),
 
     document_title:
-      cleanText(title),
+      truncate(title, 500),
 
     content_hash:
       contentHash,
 
     discovery_method:
       documentType === "PDF"
-        ? "PDF document scan"
-        : "HTML page scan",
+        ? "official-source-pdf-scan"
+        : "official-source-page-scan",
 
     verification_url:
-      url
+      url,
   };
 
-  await insertCandidate(payload);
+  try {
+    await supabasePost(
+      "vacancy_candidates",
+      candidate,
+      `candidate insert: ${source.source_name}`
+    );
 
-  return true;
+    state.candidatesFound += 1;
+
+    console.log(
+      `[CANDIDATE] ${source.source_name} | ${candidate.title} | confidence=${score}`
+    );
+  } catch (error) {
+    /*
+     * Duplicate/constraint errors should not stop the complete run.
+     */
+    const message = formatError(error);
+
+    if (
+      message.includes("23505") ||
+      message.toLowerCase().includes("duplicate")
+    ) {
+      console.log(
+        `[DUPLICATE] ${source.source_name} | ${url}`
+      );
+      return;
+    }
+
+    console.log(
+      `[CANDIDATE-ERROR] ${source.source_name}: ${message}`
+    );
+  }
 }
 
-async function processSource(source, runId) {
-  const startUrl =
+async function processSource(source, state) {
+  const sourceUrl =
     source.recruitment_url ||
     source.official_url;
 
-  if (!startUrl) {
-    throw new Error("No official/recruitment URL");
+  if (!sourceUrl || !isHttpUrl(sourceUrl)) {
+    console.log(
+      `[SKIP] ${source.source_name}: no valid official/recruitment URL`
+    );
+
+    state.errors += 1;
+
+    return;
   }
 
-  const visited = new Set();
-  const queue = [startUrl];
+  console.log(
+    `\n========== SOURCE: ${source.source_name} ==========`
+  );
 
-  let pagesScanned = 0;
-  let candidates = 0;
+  console.log(
+    `[SOURCE] ${sourceUrl}`
+  );
+
+  const queue = [];
+  const queued = new Set();
+  const visited = new Set();
+
+  const addQueue = (url, title = "", isSource = false) => {
+    if (!url || !isHttpUrl(url)) return;
+
+    const normalized = url.split("#")[0];
+
+    if (queued.has(normalized) || visited.has(normalized)) {
+      return;
+    }
+
+    /*
+     * Keep crawling within the official organization's hostname.
+     * This avoids accidentally crawling Google, social media,
+     * unrelated aggregators, etc.
+     */
+    if (!sameOfficialSite(normalized, sourceUrl)) {
+      return;
+    }
+
+    queued.add(normalized);
+
+    queue.push({
+      url: normalized,
+      title,
+      isSource,
+    });
+  };
+
+  addQueue(sourceUrl, source.source_name, true);
+
+  if (
+    source.recruitment_url &&
+    source.recruitment_url !== sourceUrl
+  ) {
+    addQueue(
+      source.recruitment_url,
+      "Recruitment",
+      true
+    );
+  }
+
+  let localPages = 0;
 
   while (
-    queue.length &&
-    visited.size < MAX_PAGES_PER_SOURCE
+    queue.length > 0 &&
+    localPages < CONFIG.MAX_PAGES_PER_SOURCE
   ) {
-    const current = queue.shift();
+    const resource = queue.shift();
 
-    if (!current || visited.has(current)) {
+    if (visited.has(resource.url)) {
       continue;
     }
 
-    if (!sameHost(current, startUrl)) {
-      continue;
-    }
-
-    if (!isAllowedOfficialHost(current)) {
-      continue;
-    }
-
-    visited.add(current);
+    visited.add(resource.url);
 
     try {
-      if (isPdf(current)) {
-        const buffer = await fetchBinary(current);
-        const text = extractPdfText(buffer);
-
-        const found = await processDocument({
-          source,
-          runId,
-          url: current,
-          title:
-            current.split("/").pop() ||
-            "Official PDF notification",
-          text,
-          documentType: "PDF"
-        });
-
-        if (found) candidates++;
-
-        continue;
-      }
-
-      const html = await fetchText(current);
-
-      pagesScanned++;
-
-      const text = pageText(html);
-
-      const pageFound = await processDocument({
+      const result = await processResource(
+        resource,
         source,
-        runId,
-        url: current,
-        title: source.source_name,
-        text,
-        documentType: "HTML"
-      });
-
-      if (pageFound) candidates++;
-
-      const links = extractLinks(
-        html,
-        current
+        state
       );
 
-      for (const link of links.slice(
-        0,
-        MAX_LINKS_PER_PAGE
-      )) {
-        if (!sameHost(link.url, startUrl)) {
-          continue;
-        }
+      localPages += 1;
 
-        if (!isAllowedOfficialHost(link.url)) {
-          continue;
-        }
+      console.log(
+        `[PAGE] ${source.source_name}: ${localPages}/${CONFIG.MAX_PAGES_PER_SOURCE} | ${result.finalUrl}`
+      );
 
-        const searchable =
-          `${link.title} ${link.url}`;
+      if (
+        result.links &&
+        result.links.length > 0 &&
+        localPages < CONFIG.MAX_PAGES_PER_SOURCE
+      ) {
+        for (const link of result.links) {
+          if (!shouldCrawlLink(link)) {
+            continue;
+          }
 
-        const recruitmentLike =
-          containsAny(
-            searchable,
-            RECRUITMENT_TERMS
+          addQueue(
+            link.url,
+            link.text,
+            false
           );
 
-        const pdfLike =
-          isPdf(link.url);
-
-        const foundryLike =
-          containsAny(
-            searchable,
-            DISCOVERY_TERMS
-          );
-
-        if (
-          pdfLike ||
-          recruitmentLike ||
-          foundryLike
-        ) {
-          if (!visited.has(link.url)) {
-            queue.push(link.url);
+          if (
+            queue.length >=
+            CONFIG.MAX_LINKS_PER_PAGE
+          ) {
+            break;
           }
         }
       }
-
     } catch (error) {
+      state.errors += 1;
+
       console.log(
-        `[PAGE ERROR] ${source.source_name}: ${current}: ${formatError(error)}`
+        `[RESOURCE-ERROR] ${source.source_name} | ${resource.url} | ${formatError(error)}`
       );
+
+      /*
+       * Continue to next page/source.
+       * One broken PDF/page must never kill the entire run.
+       */
     }
   }
 
-  return {
-    pagesScanned,
-    candidates
-  };
-}
-
-async function main() {
-  console.log("==============================================");
-  console.log("Foundryman Jobs India — V10 Monitor");
-  console.log("HTML + PDF Document Intelligence");
-  console.log("==============================================");
-
-  const run = await createMonitoringRun();
-
-  if (!run?.id) {
-    throw new Error(
-      "Could not create monitoring_runs record"
+  try {
+    await supabasePatch(
+      `source_registry?id=eq.${encodeURIComponent(source.id)}`,
+      {
+        last_checked: new Date().toISOString(),
+        last_error: null,
+      },
+      `source update: ${source.source_name}`
+    );
+  } catch (error) {
+    console.log(
+      `[SOURCE-UPDATE-WARN] ${source.source_name}: ${formatError(error)}`
     );
   }
-
-  const runId = run.id;
-
-  let sources;
-
-  try {
-    sources = await loadSources();
-  } catch (error) {
-    await updateRun(runId, {
-      finished_at: new Date().toISOString(),
-      status: "Failed",
-      errors_count: 1,
-      notes: formatError(error)
-    });
-
-    throw error;
-  }
-
-  let sourcesChecked = 0;
-  let pagesScanned = 0;
-  let candidatesFound = 0;
-  let errorsCount = 0;
 
   console.log(
-    `[SOURCES] ${sources.length}`
+    `[OK] ${source.source_name}: pages=${localPages}`
   );
+}
 
-  for (const source of sources) {
-    sourcesChecked++;
+async function runWithConcurrency(
+  items,
+  worker,
+  concurrency
+) {
+  let index = 0;
 
-    console.log(
-      `\n[START] ${source.source_name}`
-    );
+  async function runner(workerId) {
+    while (true) {
+      const currentIndex = index++;
 
-    try {
-      const result = await processSource(
-        source,
-        runId
-      );
+      if (currentIndex >= items.length) {
+        return;
+      }
 
-      pagesScanned += result.pagesScanned;
-      candidatesFound += result.candidates;
-
-      await updateSource(source.id, {
-        last_checked:
-          new Date().toISOString(),
-        last_error:
-          null
-      });
-
-      console.log(
-        `[OK] ${source.source_name}: pages=${result.pagesScanned}, candidates=${result.candidates}`
-      );
-
-    } catch (error) {
-      errorsCount++;
-
-      const message = formatError(error);
-
-      console.log(
-        `[ERROR] ${source.source_name}: ${message}`
-      );
+      const item = items[currentIndex];
 
       try {
-        await updateSource(source.id, {
-          last_checked:
-            new Date().toISOString(),
-          last_error:
-            message
-        });
-      } catch (updateError) {
+        await worker(item, currentIndex);
+      } catch (error) {
         console.log(
-          `[SOURCE UPDATE ERROR] ${formatError(updateError)}`
+          `[WORKER-${workerId}-ERROR] ${formatError(error)}`
         );
       }
     }
   }
 
-  await updateRun(runId, {
-    finished_at:
-      new Date().toISOString(),
+  const workers = [];
 
-    sources_checked:
-      sourcesChecked,
+  const count = Math.min(
+    concurrency,
+    items.length
+  );
 
-    pages_scanned:
-      pagesScanned,
+  for (let i = 0; i < count; i++) {
+    workers.push(runner(i + 1));
+  }
 
-    candidates_found:
-      candidatesFound,
+  await Promise.all(workers);
+}
 
-    errors_count:
-      errorsCount,
+async function main() {
+  console.log("==============================================");
+  console.log("FOUNDRYMAN VACANCY MONITOR V10.1");
+  console.log("==============================================");
+  console.log(
+    `Max pages/source: ${CONFIG.MAX_PAGES_PER_SOURCE}`
+  );
+  console.log(
+    `Concurrency: ${CONFIG.CONCURRENCY}`
+  );
+  console.log(
+    `Source timeout: ${CONFIG.SOURCE_TIMEOUT_MS}ms`
+  );
+  console.log(
+    `Page timeout: ${CONFIG.PAGE_TIMEOUT_MS}ms`
+  );
 
-    status:
-      "Completed",
+  let sources;
 
-    notes:
-      "V10 HTML + PDF document intelligence monitor"
-  });
+  try {
+    sources = await supabaseGet(
+      "source_registry?active=eq.true&select=*&order=priority.asc",
+      "load active sources"
+    );
+  } catch (error) {
+    console.error(
+      `[FATAL] Could not load source registry: ${formatError(error)}`
+    );
+
+    process.exit(1);
+  }
+
+  if (!Array.isArray(sources)) {
+    console.error(
+      "[FATAL] Source registry response was not an array"
+    );
+
+    process.exit(1);
+  }
+
+  console.log(
+    `[REGISTRY] Active sources: ${sources.length}`
+  );
+
+  const startedAt = new Date().toISOString();
+
+  let run;
+
+  try {
+    const inserted = await supabasePost(
+      "monitoring_runs",
+      {
+        started_at: startedAt,
+        status: "Running",
+        sources_checked: 0,
+        pages_scanned: 0,
+        candidates_found: 0,
+        errors_count: 0,
+        notes: "V10.1 production monitor started",
+      },
+      "create monitoring run"
+    );
+
+    run = Array.isArray(inserted)
+      ? inserted[0]
+      : inserted;
+
+  } catch (error) {
+    console.error(
+      `[FATAL] Could not create monitoring run: ${formatError(error)}`
+    );
+
+    process.exit(1);
+  }
+
+  if (!run?.id) {
+    console.error(
+      "[FATAL] monitoring_runs did not return a run ID"
+    );
+
+    process.exit(1);
+  }
+
+  const state = {
+    runId: run.id,
+    pagesScanned: 0,
+    candidatesFound: 0,
+    errors: 0,
+    fingerprints: new Set(),
+  };
+
+  await runWithConcurrency(
+    sources,
+    async (source) => {
+      await processSource(source, state);
+    },
+    CONFIG.CONCURRENCY
+  );
+
+  const finishedAt = new Date().toISOString();
+
+  try {
+    await supabasePatch(
+      `monitoring_runs?id=eq.${encodeURIComponent(run.id)}`,
+      {
+        finished_at: finishedAt,
+        status: "Completed",
+
+        sources_checked:
+          sources.length,
+
+        pages_scanned:
+          state.pagesScanned,
+
+        candidates_found:
+          state.candidatesFound,
+
+        errors_count:
+          state.errors,
+
+        notes:
+          `V10.1 completed. ` +
+          `Sources=${sources.length}; ` +
+          `Pages=${state.pagesScanned}; ` +
+          `Candidates=${state.candidatesFound}; ` +
+          `Errors=${state.errors}`,
+      },
+      "finish monitoring run"
+    );
+  } catch (error) {
+    console.error(
+      `[RUN-UPDATE-ERROR] ${formatError(error)}`
+    );
+  }
 
   console.log("\n==============================================");
-  console.log("MONITORING SUMMARY");
+  console.log("MONITORING COMPLETED");
   console.log("==============================================");
 
   console.log(
-    JSON.stringify({
-      checked: sourcesChecked,
-      pages: pagesScanned,
-      candidates: candidatesFound,
-      errors: errorsCount
-    })
+    JSON.stringify(
+      {
+        checked: sources.length,
+        pages: state.pagesScanned,
+        candidates: state.candidatesFound,
+        errors: state.errors,
+      }
+    )
   );
 
-  console.log("Monitoring completed");
+  console.log("==============================================");
 }
 
-main().catch(error => {
+main().catch((error) => {
   console.error(
     `[FATAL] ${formatError(error)}`
   );
+
   process.exit(1);
 });
