@@ -50,3 +50,36 @@ select
 from public.source_registry;
 
 grant select on public.source_directory to anon, authenticated;
+
+
+-- V11.2: allow one registry source to have multiple official entry points.
+alter table if exists public.source_registry
+  add column if not exists alternate_urls jsonb not null default '[]'::jsonb;
+
+-- Known official entry points that are useful when a legacy/root URL is blocked
+-- from GitHub-hosted runners. These are discovery fallbacks, not third-party sources.
+update public.source_registry
+set alternate_urls = case
+  when lower(source_name) like '%bhel%' and lower(source_name) like '%haridwar%'
+    then jsonb_build_array(
+      'https://hwr.bhel.com/recruitment/',
+      'https://hwr.bhel.com/recruitment/TradeAppr/iti_main.jsp'
+    )
+  when lower(source_name) = 'rrb'
+    then jsonb_build_array(
+      'https://www.rrbcdg.gov.in/employment-notices.php',
+      'https://rrbsecunderabad.gov.in/employment-notice/',
+      'https://rrbsecunderabad.gov.in/cen-lists/'
+    )
+  when lower(source_name) like '%railway recruitment control board%'
+    then jsonb_build_array(
+      'https://www.rrbcdg.gov.in/employment-notices.php',
+      'https://rrbsecunderabad.gov.in/cen-lists/'
+    )
+  else alternate_urls
+end
+where active = true;
+
+select source_name, alternate_urls
+from public.source_registry
+where jsonb_array_length(alternate_urls) > 0;
