@@ -2,35 +2,42 @@ name: Foundryman vacancy monitor
 
 on:
   schedule:
-    - cron: '30 2 * * *'
+    - cron: "30 2 * * *"
 
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
+    timeout-minutes: 45
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: "24.x"
 
-      - name: Install PDF extraction utility
+      - name: Verify Node
+        run: |
+          node --version
+          npm --version
+
+      - name: Install PDF tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y poppler-utils
-
-      - name: Verify PDF extraction
-        run: |
+          sudo apt-get install -y poppler-utils curl
           pdftotext -v
+          curl --version
 
       - name: Run source monitor
         env:
@@ -39,12 +46,18 @@ jobs:
         run: |
           set -o pipefail
 
+          echo "=========================================="
+          echo "Starting Foundryman V10.1 monitor"
+          echo "=========================================="
+
           node scripts/monitor-sources.mjs 2>&1 | tee monitor-output.log
 
       - name: Show complete monitor log
         if: always()
         run: |
-          echo "========== COMPLETE MONITOR LOG =========="
+          echo "=========================================="
+          echo "COMPLETE MONITOR LOG"
+          echo "=========================================="
 
           if [ -f monitor-output.log ]; then
             cat monitor-output.log
@@ -52,4 +65,6 @@ jobs:
             echo "monitor-output.log was not created"
           fi
 
-          echo "========== END MONITOR LOG =========="
+          echo "=========================================="
+          echo "END MONITOR LOG"
+          echo "=========================================="
