@@ -47,7 +47,7 @@ jobs:
           set -o pipefail
 
           echo "=========================================="
-          echo "Starting Foundryman V10.1 monitor"
+          echo "Starting Foundryman V10.2 monitor"
           echo "=========================================="
 
           node scripts/monitor-sources.mjs 2>&1 | tee monitor-output.log
@@ -67,4 +67,8 @@ jobs:
 
           echo "=========================================="
           echo "END MONITOR LOG"
+
+          echo "=========================================="
+          echo "GitHub Step Summary has the error breakdown."
+          echo "=========================================="
           echo "=========================================="
