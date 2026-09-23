@@ -165,7 +165,7 @@ async function fetchUrl(url, timeout, label){
           responseError=new Error("HTTP "+r.status+(ra?" RETRY-AFTER "+ra:""));
         }catch(e){responseError=e;}
         if(String(responseError?.message||"").toLowerCase().includes("abort"))throw responseError;
-        const args=["-L","--compressed","--silent","--show-error","--connect-timeout","8","--max-time",String(CFG.curlTimeout),"-A",CFG.userAgent,"-H","Accept: text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8","-w","\\n__STATUS__:%{http_code}\\n__TYPE__:%{content_type}\\n__URL__:%{url_effective}\\n",url];
+        const args=["-L","--compressed","--silent","--show-error","--connect-timeout","8","--max-time",String(Math.min(CFG.curlTimeout,Math.max(4,Math.ceil(timeout/1000)+1))),"-A",CFG.userAgent,"-H","Accept: text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8","-w","\\n__STATUS__:%{http_code}\\n__TYPE__:%{content_type}\\n__URL__:%{url_effective}\\n",url];
         const r=await new Promise((resolve,reject)=>{
           const p=spawn("curl",args),o=[],err=[];
           p.stdout.on("data",d=>o.push(d));p.stderr.on("data",d=>err.push(d));
@@ -241,25 +241,25 @@ function sitemapCandidates(xml,base){
 async function discoverSitemaps(rootUrls){
   const out=[],seen=new Set(),roots=[...new Set(rootUrls.map(u=>{try{const x=new URL(u);return x.origin}catch{return null}}).filter(Boolean))];
   for(const origin of roots){
-    const candidates=[origin+"/robots.txt",origin+"/sitemap.xml",origin+"/sitemap_index.xml"];
+    const candidates=[origin+"/robots.txt",origin+"/sitemap.xml"];
     for(const u of candidates){
       try{
-        const g=await fetchUrl(u,8000,"sitemap discovery");
+        const g=await fetchUrl(u,2500,"sitemap discovery");
         const raw=g.buffer.toString("utf8");
-        if(/<sitemap|<urlset|Sitemap:/i.test(raw)){
-          const declared=[...raw.matchAll(/(?:Sitemap:\s*|<loc>)(https?:\/\/[^<\s]+)(?:<\/loc>)?/gi)].map(m=>m[1]);
-          const maps=[u,...declared].filter((x,i,a)=>http(x)&&a.indexOf(x)===i).slice(0,8);
-          for(const sm of maps){
-            try{
-              const sg=sm===u?g:await fetchUrl(sm,8000,"sitemap document");
-              for(const x of sitemapCandidates(sg.buffer.toString("utf8"),sm))if(!seen.has(x)){seen.add(x);out.push(x);}
-            }catch{}
-          }
+        if(!/<sitemap|<urlset|Sitemap:/i.test(raw))continue;
+        const declared=[...raw.matchAll(/(?:Sitemap:\s*|<loc>)(https?:\/\/[^<\s]+)(?:<\/loc>)?/gi)].map(m=>m[1]);
+        const maps=[u,...declared].filter((x,i,a)=>http(x)&&a.indexOf(x)===i).slice(0,3);
+        for(const sm of maps){
+          try{
+            const sg=sm===u?g:await fetchUrl(sm,2500,"sitemap document");
+            for(const x of sitemapCandidates(sg.buffer.toString("utf8"),sm))if(!seen.has(x)){seen.add(x);out.push(x);}
+          }catch{}
         }
       }catch{}
+      if(out.length>=2500)break;
     }
   }
-  return out;
+  return out.slice(0,2500);
 }
 
 function linkRank(l){
@@ -311,7 +311,6 @@ function strategy(source){
 }
 
 async function processSource(source,run,state){
-  const started=Date.now();
   const urls=[...(Array.isArray(source.alternate_urls)?source.alternate_urls:[]),source.recruitment_url,source.official_url].filter((u,i,a)=>http(u)&&a.indexOf(u)===i);
   if(!urls.length){state.errors++;return;}
   const st=strategy(source), q=[],seen=new Set(),queued=new Set(),hosts=new Set(urls.map(host)); 
@@ -322,6 +321,7 @@ async function processSource(source,run,state){
     for(const u of sitemapUrls)push(u,"sitemap document",1,false);
     if(sitemapUrls.length)console.log(`[SITEMAP] ${source.source_name} discovered=${sitemapUrls.length}`);
   }catch{}
+  const started=Date.now();
   let pages=0,errors=0,warnings=0;
   console.log(`[SOURCE-START] ${source.source_name} targets=${urls.length} maxPages=${st.pages}`);
   while(q.length&&pages<st.pages){
