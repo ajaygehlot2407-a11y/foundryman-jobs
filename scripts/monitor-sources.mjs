@@ -1,1177 +1,901 @@
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
+import crypto from "crypto";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { execFileSync } from "child_process";
 
-const execFileAsync = promisify(execFile)
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const SUPABASE_URL = process.env.SUPABASE_URL?.replace(/\/$/, '')
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
-
-if (!SUPABASE_URL || !SERVICE_KEY) {
-  throw new Error(
-    'Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY'
-  )
+if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+  console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  process.exit(1);
 }
 
-const headers = {
-  apikey: SERVICE_KEY,
-  Authorization: `Bearer ${SERVICE_KEY}`,
-  'Content-Type': 'application/json',
-}
+const API = `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1`;
 
-const REQUEST_TIMEOUT_MS = 20000
-const MAX_FETCH_RETRIES = 2
-const MAX_PAGES_PER_SOURCE = 5
-const MAX_LINKS_PER_PAGE = 50
-const MAX_CANDIDATES_PER_SOURCE = 25
+const HEADERS = {
+  apikey: SERVICE_ROLE_KEY,
+  Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+  "Content-Type": "application/json"
+};
+
+const MAX_PAGES_PER_SOURCE = 5;
+const MAX_LINKS_PER_PAGE = 60;
+const MAX_PDF_BYTES = 15 * 1024 * 1024;
+const REQUEST_TIMEOUT = 25000;
 
 const DISCOVERY_TERMS = [
-  'foundryman',
-  'foundry man',
-  'moulder',
-  'molder',
-  'foundry',
-  'foundry worker',
-  'foundry trade',
-]
+  "foundryman",
+  "foundry man",
+  "moulder",
+  "molder",
+  "foundry worker",
+  "foundry trade",
+  "foundry"
+];
 
-const DISCOVERY_PAGE_TERMS = [
-  'recruitment',
-  'recruitment notice',
-  'vacancy',
-  'vacancies',
-  'career',
-  'careers',
-  'job',
-  'jobs',
-  'advertisement',
-  'advt',
-  'notification',
-  'notice',
-  'apprentice',
-  'apprenticeship',
-  'engagement',
-  'selection',
-]
+const CONTEXT_TERMS = [
+  "foundryman",
+  "foundry man",
+  "moulder",
+  "molder",
+  "foundry worker",
+  "foundry trade",
+  "foundry"
+];
 
-async function api(path, opts = {}) {
-  const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/${path}`,
-    {
-      ...opts,
-      headers: {
-        ...headers,
-        ...(opts.headers || {}),
-      },
-    }
-  )
+const RECRUITMENT_TERMS = [
+  "recruitment",
+  "recruitment notice",
+  "recruitment notification",
+  "vacancy",
+  "vacancies",
+  "career",
+  "careers",
+  "job",
+  "jobs",
+  "advertisement",
+  "advt",
+  "notification",
+  "notice",
+  "apprentice",
+  "apprenticeship",
+  "engagement",
+  "selection",
+  "trade test",
+  "technical"
+];
 
-  if (!response.ok) {
-    throw new Error(
-      `${response.status} ${await response.text()}`
-    )
-  }
+const HIGH_CONFIDENCE_TERMS = [
+  "foundryman",
+  "foundry man",
+  "moulder",
+  "molder"
+];
 
-  return response.status === 204
-    ? null
-    : response.json()
+const MEDIUM_CONFIDENCE_TERMS = [
+  "foundry worker",
+  "foundry trade"
+];
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function esc(value) {
-  return String(value || '')
-    .replace(/\s+/g, ' ')
-    .trim()
+function cleanText(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function terms(value) {
-  return String(value || '')
-    .split(',')
-    .map((item) => esc(item).toLowerCase())
-    .filter(Boolean)
+function normalize(value) {
+  return cleanText(value).toLowerCase();
 }
 
-function normalizeUrl(rawUrl, baseUrl) {
+function sha256(value) {
+  return crypto
+    .createHash("sha256")
+    .update(String(value || ""))
+    .digest("hex");
+}
+
+function formatError(error) {
+  if (!error) return "Unknown error";
+
+  return cleanText(
+    error?.stack ||
+    error?.message ||
+    error?.toString() ||
+    "Unknown error"
+  ).slice(0, 1000);
+}
+
+function sameHost(a, b) {
   try {
-    const url = new URL(rawUrl, baseUrl)
-    url.hash = ''
-    return url.href
+    return new URL(a).hostname === new URL(b).hostname;
   } catch {
-    return null
+    return false;
   }
 }
 
-function isHttpUrl(url) {
-  return /^https?:\/\//i.test(url)
-}
-
-function isSameHost(url, baseUrl) {
+function absoluteUrl(href, base) {
   try {
-    return (
-      new URL(url).hostname ===
-      new URL(baseUrl).hostname
-    )
+    return new URL(href, base).href;
   } catch {
-    return false
+    return null;
   }
 }
 
 function isPdf(url) {
-  return /\.pdf(?:$|[?#])/i.test(url)
+  return /\.pdf(?:$|[?#])/i.test(url);
 }
 
-function looksLikeRelevantPage(title, url) {
-  const haystack =
-    `${title} ${url}`.toLowerCase()
+function isAllowedOfficialHost(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
 
-  return DISCOVERY_PAGE_TERMS.some((term) =>
-    haystack.includes(term)
-  )
+    return (
+      /\.gov\.in$/.test(host) ||
+      /\.nic\.in$/.test(host) ||
+      /\.ac\.in$/.test(host) ||
+      /\.edu\.in$/.test(host) ||
+      /\.org\.in$/.test(host) ||
+      host === "gov.in" ||
+      host === "nic.in"
+    );
+  } catch {
+    return false;
+  }
 }
 
-function extractPageText(html) {
-  return esc(
-    String(html || '')
-      .replace(
-        /<script[\s\S]*?<\/script>/gi,
-        ' '
-      )
-      .replace(
-        /<style[\s\S]*?<\/style>/gi,
-        ' '
-      )
-      .replace(
-        /<noscript[\s\S]*?<\/noscript>/gi,
-        ' '
-      )
-      .replace(/<[^>]+>/g, ' ')
-  )
+function containsAny(text, terms) {
+  const value = normalize(text);
+  return terms.some(term => value.includes(term));
 }
 
-function findKeywordMatches(text, keywordList) {
-  const lower = String(text || '').toLowerCase()
+function extractMatchedKeywords(text) {
+  const value = normalize(text);
 
-  return keywordList.filter((term) =>
-    lower.includes(term)
-  )
+  return [...new Set(
+    DISCOVERY_TERMS.filter(term => value.includes(term))
+  )];
 }
 
-function extractLinks(html, baseUrl) {
-  const output = []
-  const seen = new Set()
+function confidenceFor(text) {
+  const value = normalize(text);
 
-  const regex =
-    /<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi
+  let score = 0;
 
-  let match
+  if (HIGH_CONFIDENCE_TERMS.some(t => value.includes(t))) {
+    score += 80;
+  }
+
+  if (MEDIUM_CONFIDENCE_TERMS.some(t => value.includes(t))) {
+    score += 60;
+  }
+
+  if (value.includes("foundry")) {
+    score += 15;
+  }
+
+  if (value.includes("iti")) {
+    score += 5;
+  }
+
+  if (value.includes("trade")) {
+    score += 5;
+  }
+
+  return Math.min(score, 100);
+}
+
+function extractContext(text) {
+  const compact = cleanText(text);
+  const lower = compact.toLowerCase();
+
+  let bestIndex = -1;
+  let bestTerm = "";
+
+  for (const term of CONTEXT_TERMS) {
+    const index = lower.indexOf(term);
+
+    if (index >= 0 && (bestIndex < 0 || index < bestIndex)) {
+      bestIndex = index;
+      bestTerm = term;
+    }
+  }
+
+  if (bestIndex < 0) {
+    return "";
+  }
+
+  const start = Math.max(0, bestIndex - 300);
+  const end = Math.min(
+    compact.length,
+    bestIndex + bestTerm.length + 500
+  );
+
+  return compact.slice(start, end);
+}
+
+function extractDeadline(text) {
+  const value = cleanText(text);
+
+  const patterns = [
+    /last\s+date.{0,100}/i,
+    /last\s+date\s+of\s+application.{0,100}/i,
+    /closing\s+date.{0,100}/i,
+    /apply\s+before.{0,100}/i,
+    /application\s+deadline.{0,100}/i,
+    /applications?\s+must\s+be\s+submitted.{0,100}/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = value.match(pattern);
+
+    if (match) {
+      return match[0].slice(0, 250);
+    }
+  }
+
+  return "";
+}
+
+function extractQualification(text) {
+  const value = cleanText(text);
+
+  const patterns = [
+    /ITI.{0,250}/i,
+    /Industrial Training Institute.{0,250}/i,
+    /NCVT.{0,250}/i,
+    /SCVT.{0,250}/i,
+    /National Apprenticeship Certificate.{0,250}/i,
+    /NAC.{0,250}/i,
+    /NTC.{0,250}/i,
+    /trade qualification.{0,250}/i,
+    /technical qualification.{0,250}/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = value.match(pattern);
+
+    if (match) {
+      return match[0].slice(0, 500);
+    }
+  }
+
+  return "";
+}
+
+function extractLinks(html, pageUrl) {
+  const results = [];
+  const regex = /<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+
+  let match;
 
   while ((match = regex.exec(html)) !== null) {
-    const href = normalizeUrl(
-      match[1],
-      baseUrl
-    )
+    const href = match[1];
+    const rawTitle = match[2]
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ");
 
-    if (!href || !isHttpUrl(href)) {
-      continue
-    }
+    const title = cleanText(rawTitle);
+    const url = absoluteUrl(href, pageUrl);
 
-    const title = esc(
-      match[2].replace(/<[^>]+>/g, ' ')
-    )
+    if (!url) continue;
 
-    if (!title || seen.has(href)) {
-      continue
-    }
-
-    seen.add(href)
-
-    output.push({
-      url: href,
-      title,
-    })
-
-    if (
-      output.length >=
-      MAX_LINKS_PER_PAGE
-    ) {
-      break
-    }
-  }
-
-  return output
-}
-
-function getContext(
-  text,
-  keyword,
-  radius = 180
-) {
-  const source = String(text || '')
-  const lower = source.toLowerCase()
-
-  const index = lower.indexOf(
-    keyword.toLowerCase()
-  )
-
-  if (index === -1) {
-    return ''
-  }
-
-  const start = Math.max(
-    0,
-    index - radius
-  )
-
-  const end = Math.min(
-    source.length,
-    index + keyword.length + radius
-  )
-
-  return esc(
-    source.slice(start, end)
-  )
-}
-
-function formatError(error) {
-  if (!error) {
-    return 'Unknown error'
-  }
-
-  const parts = []
-
-  if (error.name) {
-    parts.push(`name=${error.name}`)
-  }
-
-  if (error.code) {
-    parts.push(`code=${error.code}`)
-  }
-
-  if (error.type) {
-    parts.push(`type=${error.type}`)
-  }
-
-  if (error.message) {
-    parts.push(`message=${error.message}`)
-  }
-
-  if (error.cause?.code) {
-    parts.push(
-      `cause_code=${error.cause.code}`
-    )
-  }
-
-  if (error.cause?.message) {
-    parts.push(
-      `cause_message=${error.cause.message}`
-    )
-  }
-
-  if (error.stderr) {
-    parts.push(
-      `stderr=${esc(error.stderr).slice(0, 500)}`
-    )
-  }
-
-  if (error.stdout) {
-    parts.push(
-      `stdout=${esc(error.stdout).slice(0, 500)}`
-    )
-  }
-
-  return parts.join(' | ')
-}
-
-async function fetchWithNode(url) {
-  let lastError = null
-
-  for (
-    let attempt = 1;
-    attempt <= MAX_FETCH_RETRIES;
-    attempt++
-  ) {
-    const controller =
-      new AbortController()
-
-    const timer = setTimeout(
-      () =>
-        controller.abort(),
-      REQUEST_TIMEOUT_MS
-    )
-
-    try {
-      console.log(
-        `[NODE] ${url} attempt ${attempt}/${MAX_FETCH_RETRIES}`
-      )
-
-      const response =
-        await fetch(url, {
-          redirect: 'follow',
-          signal: controller.signal,
-          headers: {
-            'user-agent':
-              'Mozilla/5.0 (compatible; FoundrymanJobsMonitor/3.0)',
-            accept:
-              'text/html,application/xhtml+xml,application/pdf,text/plain;q=0.9,*/*;q=0.5',
-          },
-        })
-
-      const contentType =
-        response.headers.get(
-          'content-type'
-        ) || ''
-
-      const body =
-        await response.text()
-
-      console.log(
-        `[NODE-RESULT] ${url} -> HTTP ${response.status}, final=${response.url}, type=${contentType}`
-      )
-
-      return {
-        status: response.status,
-        finalUrl:
-          response.url || url,
-        contentType,
-        body,
-        method: 'node-fetch',
-      }
-    } catch (error) {
-      lastError = error
-
-      console.log(
-        `[NODE-ERROR] ${url} -> ${formatError(error)}`
-      )
-
-      if (
-        attempt <
-        MAX_FETCH_RETRIES
-      ) {
-        await new Promise(
-          (resolve) =>
-            setTimeout(resolve, 1500)
-        )
-      }
-    } finally {
-      clearTimeout(timer)
-    }
-  }
-
-  throw lastError ||
-    new Error('Node fetch failed')
-}
-
-async function fetchWithCurl(url) {
-  const args = [
-    '-L',
-    '--silent',
-    '--show-error',
-    '--max-time',
-    '20',
-    '--connect-timeout',
-    '10',
-    '--retry',
-    '1',
-    '-A',
-    'Mozilla/5.0 (compatible; FoundrymanJobsMonitor/3.0)',
-    '-H',
-    'Accept: text/html,application/xhtml+xml,text/plain,*/*;q=0.8',
-    '-w',
-    '\n__STATUS__:%{http_code}\n__FINAL_URL__:%{url_effective}\n__CONTENT_TYPE__:%{content_type}\n',
-    url,
-  ]
-
-  try {
-    console.log(
-      `[CURL] ${url}`
-    )
-
-    const result =
-      await execFileAsync(
-        'curl',
-        args,
-        {
-          maxBuffer:
-            10 * 1024 * 1024,
-        }
-      )
-
-    const output =
-      result.stdout || ''
-
-    const statusMatch =
-      output.match(
-        /__STATUS__:(\d+)/
-      )
-
-    const finalUrlMatch =
-      output.match(
-        /__FINAL_URL__:(.*)/
-      )
-
-    const contentTypeMatch =
-      output.match(
-        /__CONTENT_TYPE__:(.*)/
-      )
-
-    const body =
-      output.replace(
-        /\n__STATUS__:\d+\n[\s\S]*$/,
-        ''
-      )
-
-    const status =
-      Number(
-        statusMatch?.[1] || 0
-      )
-
-    const finalUrl =
-      esc(
-        finalUrlMatch?.[1] || url
-      )
-
-    const contentType =
-      esc(
-        contentTypeMatch?.[1] || ''
-      )
-
-    console.log(
-      `[CURL-RESULT] ${url} -> HTTP ${status}, final=${finalUrl}, type=${contentType}`
-    )
-
-    return {
-      status,
-      finalUrl,
-      contentType,
-      body,
-      method: 'curl',
-    }
-  } catch (error) {
-    console.log(
-      `[CURL-ERROR] ${url} -> ${formatError(error)}`
-    )
-
-    throw error
-  }
-}
-
-async function fetchPage(url) {
-  let nodeError = null
-
-  try {
-    return await fetchWithNode(url)
-  } catch (error) {
-    nodeError = error
-
-    console.log(
-      `[FALLBACK] Node failed for ${url}`
-    )
-  }
-
-  try {
-    return await fetchWithCurl(url)
-  } catch (curlError) {
-    throw new Error(
-      `FETCH FAILED | URL=${url} | NODE=${formatError(nodeError)} | CURL=${formatError(curlError)}`
-    )
-  }
-}
-
-async function fingerprint(
-  url,
-  title
-) {
-  const data =
-    new TextEncoder().encode(
-      `${url}|${title}`
-    )
-
-  const hash =
-    await crypto.subtle.digest(
-      'SHA-256',
-      data
-    )
-
-  return Array.from(
-    new Uint8Array(hash)
-  )
-    .map((value) =>
-      value
-        .toString(16)
-        .padStart(2, '0')
-    )
-    .join('')
-}
-
-function candidateTitle(item) {
-  if (item.title) {
-    return item.title
-  }
-
-  if (isPdf(item.url)) {
-    try {
-      return (
-        decodeURIComponent(
-          item.url
-            .split('/')
-            .pop() || ''
-        ) ||
-        'PDF Notification'
-      )
-    } catch {
-      return 'PDF Notification'
-    }
-  }
-
-  return 'Potential Foundryman Vacancy'
-}
-
-async function insertCandidate({
-  source,
-  run,
-  item,
-  matchedKeywords,
-  discoveryMatches,
-  sourceStatus,
-  snippet,
-}) {
-  const title =
-    candidateTitle(item)
-
-  const fp =
-    await fingerprint(
-      item.url,
+    results.push({
+      url,
       title
-    )
+    });
+  }
+
+  return results;
+}
+
+function pageText(html) {
+  return cleanText(
+    html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+  );
+}
+
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+
+  const timeout = setTimeout(
+    () => controller.abort(),
+    REQUEST_TIMEOUT
+  );
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      redirect: "follow",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 Foundryman-Jobs-India-Monitor/10.0",
+        Accept:
+          "text/html,application/xhtml+xml,application/pdf,*/*",
+        ...(options.headers || {})
+      }
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchText(url) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await fetchWithTimeout(url);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      return await response.text();
+    } catch (error) {
+      lastError = error;
+
+      if (attempt < 3) {
+        console.log(
+          `[RETRY] ${url} attempt=${attempt + 1}`
+        );
+        await sleep(1000 * attempt);
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+async function fetchBinary(url) {
+  const response = await fetchWithTimeout(url);
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+
+  if (buffer.length > MAX_PDF_BYTES) {
+    throw new Error(
+      `PDF exceeds ${MAX_PDF_BYTES} byte limit`
+    );
+  }
+
+  return buffer;
+}
+
+function extractPdfText(buffer) {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "foundryman-pdf-")
+  );
+
+  const pdfPath = path.join(tempDir, "document.pdf");
+  const txtPath = path.join(tempDir, "document.txt");
+
+  try {
+    fs.writeFileSync(pdfPath, buffer);
+
+    execFileSync(
+      "pdftotext",
+      ["-layout", pdfPath, txtPath],
+      {
+        timeout: 30000,
+        maxBuffer: 20 * 1024 * 1024
+      }
+    );
+
+    return fs.readFileSync(txtPath, "utf8");
+  } finally {
+    try {
+      fs.rmSync(tempDir, {
+        recursive: true,
+        force: true
+      });
+    } catch {}
+  }
+}
+
+async function api(pathname, options = {}) {
+  const response = await fetchWithTimeout(
+    `${API}${pathname}`,
+    {
+      ...options,
+      headers: {
+        ...HEADERS,
+        ...(options.headers || {})
+      }
+    }
+  );
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `Supabase HTTP ${response.status}: ${text.slice(0, 1000)}`
+    );
+  }
+
+  if (!text.trim()) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+async function loadSources() {
+  return await api(
+    "/source_registry?active=eq.true&select=*&order=priority.asc"
+  );
+}
+
+async function createMonitoringRun() {
+  const result = await api(
+    "/monitoring_runs",
+    {
+      method: "POST",
+      headers: {
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify({
+        started_at: new Date().toISOString(),
+        sources_checked: 0,
+        pages_scanned: 0,
+        candidates_found: 0,
+        errors_count: 0,
+        status: "Running",
+        notes: "V10 HTML + PDF document monitor"
+      })
+    }
+  );
+
+  return Array.isArray(result) ? result[0] : result;
+}
+
+async function updateRun(runId, data) {
+  await api(
+    `/monitoring_runs?id=eq.${encodeURIComponent(runId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(data)
+    }
+  );
+}
+
+async function updateSource(sourceId, data) {
+  await api(
+    `/source_registry?id=eq.${encodeURIComponent(sourceId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(data)
+    }
+  );
+}
+
+async function existingFingerprint(fingerprint) {
+  const rows = await api(
+    `/vacancy_candidates?fingerprint=eq.${encodeURIComponent(
+      fingerprint
+    )}&select=id,duplicate_of_vacancy_id&limit=1`
+  );
+
+  return Array.isArray(rows) && rows.length
+    ? rows[0]
+    : null;
+}
+
+async function insertCandidate(payload) {
+  return await api(
+    "/vacancy_candidates",
+    {
+      method: "POST",
+      headers: {
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify(payload)
+    }
+  );
+}
+
+function candidateFingerprint(sourceId, url, title) {
+  return sha256(
+    `${sourceId}|${normalize(url)}|${normalize(title)}`
+  );
+}
+
+async function processDocument({
+  source,
+  runId,
+  url,
+  title,
+  text,
+  documentType
+}) {
+  const cleaned = cleanText(text);
+
+  if (!cleaned) return false;
+
+  if (!containsAny(cleaned, DISCOVERY_TERMS)) {
+    return false;
+  }
+
+  const matchedKeywords = extractMatchedKeywords(cleaned);
+
+  const context = extractContext(cleaned);
+
+  const confidence = confidenceFor(
+    `${title} ${cleaned.slice(0, 15000)}`
+  );
+
+  const deadline = extractDeadline(cleaned);
+
+  const qualification = extractQualification(cleaned);
+
+  const fingerprint = candidateFingerprint(
+    source.id,
+    url,
+    title
+  );
+
+  const contentHash = sha256(
+    cleaned.slice(0, 100000)
+  );
+
+  const duplicate = await existingFingerprint(
+    fingerprint
+  );
+
+  if (duplicate) {
+    return false;
+  }
 
   const payload = {
     source_id: source.id,
-    monitoring_run_id: run.id,
-    title,
-    url: item.url,
+    monitoring_run_id: runId,
+    discovered_at: new Date().toISOString(),
+
+    title:
+      cleanText(title) ||
+      "Foundryman-related recruitment document",
+
+    url,
+
     matched_keywords:
-      matchedKeywords.join(', '),
+      matchedKeywords.join(", "),
+
     snippet:
-      snippet ||
-      `Potential vacancy discovered from ${source.source_name}. Official eligibility and equivalence require manual verification.`,
+      context.slice(0, 1000),
+
     source_status:
-      `HTTP ${sourceStatus}`,
+      "Official Source",
+
     eligibility_status:
-      'Needs Verification',
+      "Needs Verification",
+
     review_status:
-      'Pending Review',
-    fingerprint: fp,
+      "Pending Review",
+
+    duplicate_of_vacancy_id:
+      null,
+
+    fingerprint,
+
+    document_type:
+      documentType,
+
+    matched_context:
+      context,
+
+    confidence_score:
+      confidence,
+
+    deadline_text:
+      deadline,
+
+    qualification_text:
+      qualification,
+
+    document_title:
+      cleanText(title),
+
+    content_hash:
+      contentHash,
+
+    discovery_method:
+      documentType === "PDF"
+        ? "PDF document scan"
+        : "HTML page scan",
+
+    verification_url:
+      url
+  };
+
+  await insertCandidate(payload);
+
+  return true;
+}
+
+async function processSource(source, runId) {
+  const startUrl =
+    source.recruitment_url ||
+    source.official_url;
+
+  if (!startUrl) {
+    throw new Error("No official/recruitment URL");
   }
 
-  if (
-    discoveryMatches.length > 0
+  const visited = new Set();
+  const queue = [startUrl];
+
+  let pagesScanned = 0;
+  let candidates = 0;
+
+  while (
+    queue.length &&
+    visited.size < MAX_PAGES_PER_SOURCE
   ) {
-    payload.snippet +=
-      ` Discovery terms: ${discoveryMatches.join(', ')}.`
-  }
+    const current = queue.shift();
 
-  try {
-    await api(
-      'vacancy_candidates',
-      {
-        method: 'POST',
-        headers: {
-          Prefer:
-            'return=minimal',
-        },
-        body:
-          JSON.stringify(
-            payload
-          ),
-      }
-    )
-
-    return true
-  } catch (error) {
-    const message =
-      String(
-        error.message || ''
-      ).toLowerCase()
-
-    if (
-      message.includes(
-        'duplicate'
-      ) ||
-      message.includes(
-        'unique constraint'
-      )
-    ) {
-      return false
+    if (!current || visited.has(current)) {
+      continue;
     }
 
-    throw error
+    if (!sameHost(current, startUrl)) {
+      continue;
+    }
+
+    if (!isAllowedOfficialHost(current)) {
+      continue;
+    }
+
+    visited.add(current);
+
+    try {
+      if (isPdf(current)) {
+        const buffer = await fetchBinary(current);
+        const text = extractPdfText(buffer);
+
+        const found = await processDocument({
+          source,
+          runId,
+          url: current,
+          title:
+            current.split("/").pop() ||
+            "Official PDF notification",
+          text,
+          documentType: "PDF"
+        });
+
+        if (found) candidates++;
+
+        continue;
+      }
+
+      const html = await fetchText(current);
+
+      pagesScanned++;
+
+      const text = pageText(html);
+
+      const pageFound = await processDocument({
+        source,
+        runId,
+        url: current,
+        title: source.source_name,
+        text,
+        documentType: "HTML"
+      });
+
+      if (pageFound) candidates++;
+
+      const links = extractLinks(
+        html,
+        current
+      );
+
+      for (const link of links.slice(
+        0,
+        MAX_LINKS_PER_PAGE
+      )) {
+        if (!sameHost(link.url, startUrl)) {
+          continue;
+        }
+
+        if (!isAllowedOfficialHost(link.url)) {
+          continue;
+        }
+
+        const searchable =
+          `${link.title} ${link.url}`;
+
+        const recruitmentLike =
+          containsAny(
+            searchable,
+            RECRUITMENT_TERMS
+          );
+
+        const pdfLike =
+          isPdf(link.url);
+
+        const foundryLike =
+          containsAny(
+            searchable,
+            DISCOVERY_TERMS
+          );
+
+        if (
+          pdfLike ||
+          recruitmentLike ||
+          foundryLike
+        ) {
+          if (!visited.has(link.url)) {
+            queue.push(link.url);
+          }
+        }
+      }
+
+    } catch (error) {
+      console.log(
+        `[PAGE ERROR] ${source.source_name}: ${current}: ${formatError(error)}`
+      );
+    }
   }
+
+  return {
+    pagesScanned,
+    candidates
+  };
 }
 
 async function main() {
-  const sources =
-    await api(
-      'source_registry?active=eq.true&select=*&order=priority.asc'
-    )
+  console.log("==============================================");
+  console.log("Foundryman Jobs India — V10 Monitor");
+  console.log("HTML + PDF Document Intelligence");
+  console.log("==============================================");
 
-  const runResponse =
-    await api(
-      'monitoring_runs',
-      {
-        method: 'POST',
-        headers: {
-          Prefer:
-            'return=representation',
-        },
-        body:
-          JSON.stringify({
-            status: 'Running',
-          }),
-      }
-    )
+  const run = await createMonitoringRun();
 
-  const run =
-    runResponse[0]
+  if (!run?.id) {
+    throw new Error(
+      "Could not create monitoring_runs record"
+    );
+  }
 
-  let checked = 0
-  let pages = 0
-  let candidates = 0
-  let errors = 0
+  const runId = run.id;
+
+  let sources;
+
+  try {
+    sources = await loadSources();
+  } catch (error) {
+    await updateRun(runId, {
+      finished_at: new Date().toISOString(),
+      status: "Failed",
+      errors_count: 1,
+      notes: formatError(error)
+    });
+
+    throw error;
+  }
+
+  let sourcesChecked = 0;
+  let pagesScanned = 0;
+  let candidatesFound = 0;
+  let errorsCount = 0;
+
+  console.log(
+    `[SOURCES] ${sources.length}`
+  );
 
   for (const source of sources) {
-    checked++
+    sourcesChecked++;
 
-    const rootUrl =
-      source.recruitment_url ||
-      source.official_url
-
-    let sourcePages = 0
-    let sourceCandidates = 0
-
-    console.log('')
     console.log(
-      `========== ${source.source_name} ==========`
-    )
-    console.log(
-      `[SOURCE-URL] ${rootUrl}`
-    )
+      `\n[START] ${source.source_name}`
+    );
 
     try {
-      const exactTerms =
-        terms(
-          source.search_keywords
-        )
+      const result = await processSource(
+        source,
+        runId
+      );
 
-      const discoveryTerms =
-        Array.from(
-          new Set([
-            ...exactTerms,
-            ...DISCOVERY_TERMS,
-          ])
-        )
+      pagesScanned += result.pagesScanned;
+      candidatesFound += result.candidates;
 
-      const queue = [
-        {
-          url: rootUrl,
-          title:
-            source.source_name ||
-            'Official Source',
-          depth: 0,
-        },
-      ]
-
-      const visited =
-        new Set()
-
-      const candidateUrls =
-        new Set()
-
-      while (
-        queue.length > 0 &&
-        sourcePages <
-          MAX_PAGES_PER_SOURCE
-      ) {
-        const current =
-          queue.shift()
-
-        const normalized =
-          normalizeUrl(
-            current.url,
-            rootUrl
-          )
-
-        if (!normalized) {
-          continue
-        }
-
-        if (
-          visited.has(
-            normalized
-          )
-        ) {
-          continue
-        }
-
-        if (
-          !isSameHost(
-            normalized,
-            rootUrl
-          )
-        ) {
-          continue
-        }
-
-        visited.add(normalized)
-
-        let response
-
-        try {
-          response =
-            await fetchPage(
-              normalized
-            )
-        } catch (error) {
-          console.log(
-            `[SOURCE-FETCH-FAILED] ${source.source_name} | ${normalized}`
-          )
-
-          console.log(
-            `[SOURCE-FETCH-DETAIL] ${formatError(error)}`
-          )
-
-          throw error
-        }
-
-        sourcePages++
-        pages++
-
-        const contentType =
-          response.contentType
-            .toLowerCase()
-
-        if (
-          isPdf(normalized) ||
-          contentType.includes(
-            'application/pdf'
-          )
-        ) {
-          const haystack =
-            `${current.title} ${normalized}`
-              .toLowerCase()
-
-          const exactMatches =
-            exactTerms.filter(
-              (term) =>
-                haystack.includes(
-                  term
-                )
-            )
-
-          const discoveryMatches =
-            DISCOVERY_TERMS.filter(
-              (term) =>
-                haystack.includes(
-                  term
-                )
-            )
-
-          if (
-            exactMatches.length > 0 ||
-            discoveryMatches.length > 0 ||
-            looksLikeRelevantPage(
-              current.title,
-              normalized
-            )
-          ) {
-            if (
-              !candidateUrls.has(
-                normalized
-              ) &&
-              sourceCandidates <
-                MAX_CANDIDATES_PER_SOURCE
-            ) {
-              candidateUrls.add(
-                normalized
-              )
-
-              const inserted =
-                await insertCandidate(
-                  {
-                    source,
-                    run,
-                    item: {
-                      url: normalized,
-                      title:
-                        candidateTitle(
-                          {
-                            url: normalized,
-                            title:
-                              current.title,
-                          }
-                        ),
-                    },
-                    matchedKeywords:
-                      exactMatches,
-                    discoveryMatches,
-                    sourceStatus:
-                      response.status,
-                    snippet:
-                      `Potential official PDF discovered from ${source.source_name}. Manual verification is required before publication.`,
-                  }
-                )
-
-              if (inserted) {
-                candidates++
-                sourceCandidates++
-              }
-            }
-          }
-
-          continue
-        }
-
-        const pageText =
-          extractPageText(
-            response.body
-          )
-
-        const exactMatches =
-          findKeywordMatches(
-            pageText,
-            exactTerms
-          )
-
-        const discoveryMatches =
-          findKeywordMatches(
-            pageText,
-            discoveryTerms
-          )
-
-        const pageLinks =
-          extractLinks(
-            response.body,
-            response.finalUrl
-          )
-
-        for (
-          const link of pageLinks
-        ) {
-          if (
-            candidateUrls.size >=
-            MAX_CANDIDATES_PER_SOURCE
-          ) {
-            break
-          }
-
-          if (
-            !isSameHost(
-              link.url,
-              rootUrl
-            )
-          ) {
-            continue
-          }
-
-          const haystack =
-            `${link.title} ${link.url}`
-              .toLowerCase()
-
-          const linkExactMatches =
-            exactTerms.filter(
-              (term) =>
-                haystack.includes(
-                  term
-                )
-            )
-
-          const linkDiscoveryMatches =
-            DISCOVERY_TERMS.filter(
-              (term) =>
-                haystack.includes(
-                  term
-                )
-            )
-
-          const relevantPageLink =
-            looksLikeRelevantPage(
-              link.title,
-              link.url
-            )
-
-          const interesting =
-            linkExactMatches.length > 0 ||
-            linkDiscoveryMatches.length > 0 ||
-            relevantPageLink
-
-          if (!interesting) {
-            continue
-          }
-
-          if (
-            isPdf(link.url)
-          ) {
-            if (
-              candidateUrls.has(
-                link.url
-              )
-            ) {
-              continue
-            }
-
-            candidateUrls.add(
-              link.url
-            )
-
-            const inserted =
-              await insertCandidate(
-                {
-                  source,
-                  run,
-                  item: link,
-                  matchedKeywords:
-                    [
-                      ...new Set([
-                        ...exactMatches,
-                        ...linkExactMatches,
-                      ]),
-                    ],
-                  discoveryMatches:
-                    [
-                      ...new Set([
-                        ...discoveryMatches,
-                        ...linkDiscoveryMatches,
-                      ]),
-                    ],
-                  sourceStatus:
-                    response.status,
-                  snippet:
-                    `Potential official PDF linked from ${source.source_name}. Manual verification is required before publication.`,
-                }
-              )
-
-            if (inserted) {
-              candidates++
-              sourceCandidates++
-            }
-
-            continue
-          }
-
-          if (
-            current.depth < 2 &&
-            queue.length <
-              MAX_PAGES_PER_SOURCE * 3
-          ) {
-            queue.push({
-              url: link.url,
-              title: link.title,
-              depth:
-                current.depth + 1,
-            })
-          }
-
-          if (
-            linkExactMatches.length >
-              0 &&
-            !candidateUrls.has(
-              link.url
-            )
-          ) {
-            candidateUrls.add(
-              link.url
-            )
-
-            const inserted =
-              await insertCandidate(
-                {
-                  source,
-                  run,
-                  item: link,
-                  matchedKeywords:
-                    [
-                      ...new Set([
-                        ...exactMatches,
-                        ...linkExactMatches,
-                      ]),
-                    ],
-                  discoveryMatches:
-                    [
-                      ...new Set([
-                        ...discoveryMatches,
-                        ...linkDiscoveryMatches,
-                      ]),
-                    ],
-                  sourceStatus:
-                    response.status,
-                  snippet:
-                    getContext(
-                      pageText,
-                      linkExactMatches[0]
-                    ) ||
-                    `Exact configured keyword found in official link: ${link.title}`,
-                }
-              )
-
-            if (inserted) {
-              candidates++
-              sourceCandidates++
-            }
-          }
-        }
-
-        if (
-          exactMatches.length > 0 &&
-          !candidateUrls.has(
-            response.finalUrl
-          ) &&
-          sourceCandidates <
-            MAX_CANDIDATES_PER_SOURCE
-        ) {
-          candidateUrls.add(
-            response.finalUrl
-          )
-
-          const inserted =
-            await insertCandidate(
-              {
-                source,
-                run,
-                item: {
-                  url:
-                    response.finalUrl,
-                  title:
-                    current.title ||
-                    source.source_name ||
-                    'Potential Vacancy Page',
-                },
-                matchedKeywords:
-                  exactMatches,
-                discoveryMatches,
-                sourceStatus:
-                  response.status,
-                snippet:
-                  getContext(
-                    pageText,
-                    exactMatches[0]
-                  ),
-              }
-            )
-
-          if (inserted) {
-            candidates++
-            sourceCandidates++
-          }
-        }
-      }
-
-      await api(
-        `source_registry?id=eq.${source.id}`,
-        {
-          method: 'PATCH',
-          headers: {
-            Prefer:
-              'return=minimal',
-          },
-          body:
-            JSON.stringify({
-              last_checked:
-                new Date().toISOString(),
-              last_status:
-                'HTTP scan completed',
-              last_error: null,
-              updated_at:
-                new Date().toISOString(),
-            }),
-        }
-      )
+      await updateSource(source.id, {
+        last_checked:
+          new Date().toISOString(),
+        last_error:
+          null
+      });
 
       console.log(
-        `[OK] ${source.source_name}: pages=${sourcePages}, candidates=${sourceCandidates}`
-      )
+        `[OK] ${source.source_name}: pages=${result.pagesScanned}, candidates=${result.candidates}`
+      );
+
     } catch (error) {
-      errors++
+      errorsCount++;
 
-      const detailedError =
-        String(
-          error.message ||
-            formatError(error)
-        ).slice(0, 500)
+      const message = formatError(error);
 
-      await api(
-        `source_registry?id=eq.${source.id}`,
-        {
-          method: 'PATCH',
-          headers: {
-            Prefer:
-              'return=minimal',
-          },
-          body:
-            JSON.stringify({
-              last_checked:
-                new Date().toISOString(),
-              last_status:
-                'ERROR',
-              last_error:
-                detailedError,
-              updated_at:
-                new Date().toISOString(),
-            }),
-        }
-      )
+      console.log(
+        `[ERROR] ${source.source_name}: ${message}`
+      );
 
-      console.error(
-        `[ERROR] ${source.source_name}: ${detailedError}`
-      )
+      try {
+        await updateSource(source.id, {
+          last_checked:
+            new Date().toISOString(),
+          last_error:
+            message
+        });
+      } catch (updateError) {
+        console.log(
+          `[SOURCE UPDATE ERROR] ${formatError(updateError)}`
+        );
+      }
     }
   }
 
-  await api(
-    `monitoring_runs?id=eq.${run.id}`,
-    {
-      method: 'PATCH',
-      headers: {
-        Prefer:
-          'return=minimal',
-      },
-      body:
-        JSON.stringify({
-          finished_at:
-            new Date().toISOString(),
-          sources_checked:
-            checked,
-          pages_scanned:
-            pages,
-          candidates_found:
-            candidates,
-          errors_count:
-            errors,
-          status:
-            errors === checked
-              ? 'Failed'
-              : 'Completed',
-          notes:
-            'V7 diagnostic source monitor. Detailed Node/curl fetch errors are preserved for failed sources. Candidates require manual official verification before publication.',
-        }),
-    }
-  )
+  await updateRun(runId, {
+    finished_at:
+      new Date().toISOString(),
 
-  console.log('')
-  console.log(
-    '========== MONITORING SUMMARY =========='
-  )
+    sources_checked:
+      sourcesChecked,
+
+    pages_scanned:
+      pagesScanned,
+
+    candidates_found:
+      candidatesFound,
+
+    errors_count:
+      errorsCount,
+
+    status:
+      "Completed",
+
+    notes:
+      "V10 HTML + PDF document intelligence monitor"
+  });
+
+  console.log("\n==============================================");
+  console.log("MONITORING SUMMARY");
+  console.log("==============================================");
 
   console.log(
     JSON.stringify({
-      checked,
-      pages,
-      candidates,
-      errors,
+      checked: sourcesChecked,
+      pages: pagesScanned,
+      candidates: candidatesFound,
+      errors: errorsCount
     })
-  )
+  );
+
+  console.log("Monitoring completed");
 }
 
-main().catch((error) => {
+main().catch(error => {
   console.error(
     `[FATAL] ${formatError(error)}`
-  )
-
-  process.exit(1)
-})
+  );
+  process.exit(1);
+});
