@@ -229,6 +229,39 @@ function parseHtml(raw,base){
   return {title,text,links};
 }
 
+function sitemapCandidates(xml,base){
+  const out=[],seen=new Set(),re=/<(?:loc)>([\\s\\S]*?)<\\/(?:loc)>/gi;let m;
+  while((m=re.exec(xml))&&out.length<2500){
+    const u=normalize(m[1].trim(),base);if(!http(u)||seen.has(u))continue;
+    const v=u.toLowerCase();
+    if(/foundry|moulder|molder|vacanc|recruit|career|job|apprentice|notification|advertisement|iti|\\.pdf|uploads|documents|download|employment/.test(v)){seen.add(u);out.push(u);}
+  }
+  return out;
+}
+async function discoverSitemaps(rootUrls){
+  const out=[],seen=new Set(),roots=[...new Set(rootUrls.map(u=>{try{const x=new URL(u);return x.origin}catch{return null}}).filter(Boolean))];
+  for(const origin of roots){
+    const candidates=[origin+"/robots.txt",origin+"/sitemap.xml",origin+"/sitemap_index.xml"];
+    for(const u of candidates){
+      try{
+        const g=await fetchUrl(u,8000,"sitemap discovery");
+        const raw=g.buffer.toString("utf8");
+        if(/<sitemap|<urlset|Sitemap:/i.test(raw)){
+          const declared=[...raw.matchAll(/(?:Sitemap:\s*|<loc>)(https?:\\/\\/[^<\\s]+)(?:<\\/loc>)?/gi)].map(m=>m[1]);
+          const maps=[u,...declared].filter((x,i,a)=>http(x)&&a.indexOf(x)===i).slice(0,8);
+          for(const sm of maps){
+            try{
+              const sg=sm===u?g:await fetchUrl(sm,8000,"sitemap document");
+              for(const x of sitemapCandidates(sg.buffer.toString("utf8"),sm))if(!seen.has(x)){seen.add(x);out.push(x);}
+            }catch{}
+          }
+        }
+      }catch{}
+    }
+  }
+  return out;
+}
+
 function linkRank(l){
   const v=(clean(l.text)+" "+l.url).toLowerCase();let n=0;
   if(/foundryman|foundry[ -]?man|moulder|molder/.test(v))n+=100;
@@ -284,6 +317,11 @@ async function processSource(source,run,state){
   const st=strategy(source), q=[],seen=new Set(),queued=new Set(),hosts=new Set(urls.map(host)); 
   const push=(url,title="",depth=0,isRoot=false)=>{if(!url||!http(url)||queued.has(url)||seen.has(url))return;const h=host(url);if(![...hosts].some(x=>h===x||h.endsWith("."+x)||x.endsWith("."+h)))return;queued.add(url);q.push({url,title,depth,isRoot});};
   urls.forEach(u=>push(u,"Recruitment",0,true));
+  try{
+    const sitemapUrls=await discoverSitemaps(urls);
+    for(const u of sitemapUrls)push(u,"sitemap document",1,false);
+    if(sitemapUrls.length)console.log(`[SITEMAP] ${source.source_name} discovered=${sitemapUrls.length}`);
+  }catch{}
   let pages=0,errors=0,warnings=0;
   console.log(`[SOURCE-START] ${source.source_name} targets=${urls.length} maxPages=${st.pages}`);
   while(q.length&&pages<st.pages){
