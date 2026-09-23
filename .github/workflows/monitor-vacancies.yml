@@ -47,7 +47,7 @@ jobs:
           set -o pipefail
 
           echo "=========================================="
-          echo "Starting Foundryman V10.2 monitor"
+          echo "Starting Foundryman V10.3 monitor"
           echo "=========================================="
 
           node scripts/monitor-sources.mjs 2>&1 | tee monitor-output.log
