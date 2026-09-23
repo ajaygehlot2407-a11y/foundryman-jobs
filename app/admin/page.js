@@ -75,7 +75,7 @@ export default function AdminPage() {
   const sb = useMemo(() => getSupabase(), [])
   const [session, setSession] = useState(null), [checking, setChecking] = useState(true), [authorized, setAuthorized] = useState(false)
   const [email, setEmail] = useState(''), [password, setPassword] = useState(''), [rows, setRows] = useState([])
-  const [form, setForm] = useState(emptyForm), [editingId, setEditingId] = useState(null)
+  const [form, setForm] = useState(emptyForm), [editingId, setEditingId] = useState(null), [candidates, setCandidates] = useState([])
   const [busy, setBusy] = useState(false), [message, setMessage] = useState(''), [error, setError] = useState('')
   const [search, setSearch] = useState(''), [statusFilter, setStatusFilter] = useState('All'), [verificationFilter, setVerificationFilter] = useState('All'), [jobTypeFilter, setJobTypeFilter] = useState('All')
 
@@ -102,7 +102,11 @@ export default function AdminPage() {
     const { data, error } = await sb.from('admin_users').select('user_id, email, active').eq('user_id', user.id).eq('active', true).maybeSingle()
     if (error) { setAuthorized(false); setError(error.message); return }
     setAuthorized(!!data)
-    if (data) await loadRows()
+    if (data) { await loadRows(); await loadCandidates() }
+  }
+  async function loadCandidates() {
+    const { data, error } = await sb.from('vacancy_candidates').select('*').eq('review_status', 'Pending Review').order('confidence_score', { ascending: false }).order('discovered_at', { ascending: false }).limit(100)
+    if (!error) setCandidates(data || [])
   }
   async function loadRows() {
     const { data, error } = await sb.from('vacancies').select('*').order('created_at', { ascending: false })
@@ -145,7 +149,33 @@ export default function AdminPage() {
     Object.keys(payload).forEach(k => { if (payload[k] === '') payload[k] = null })
     const result = editingId ? await sb.from('vacancies').update(payload).eq('id', editingId) : await sb.from('vacancies').insert(payload)
     if (result.error) setError(result.error.message)
-    else { setMessage(editingId ? 'Vacancy updated successfully.' : 'Vacancy added successfully.'); setForm({ ...emptyForm, vacancy_id: nextVacancyId([...rows, payload]) }); setEditingId(null); await loadRows() }
+    else { setMessage(editingId ? 'Vacancy updated successfully.' : 'Vacancy added successfully.'); setForm({ ...emptyForm, vacancy_id: nextVacancyId([...rows, payload]) }); setEditingId(null); await loadRows(); await loadCandidates() }
+    setBusy(false)
+  }
+  async function reviewCandidate(row) {
+    setEditingId(null)
+    setForm({
+      ...emptyForm,
+      vacancy_id: nextVacancyId(rows),
+      organization: row.source_name || '',
+      post: row.title || '',
+      eligibility: 'ITI Foundryman',
+      qualification: row.qualification_text || '',
+      last_date: '',
+      official_notification_url: row.verification_url || row.url || '',
+      source_website: row.verification_url || row.url || '',
+      foundryman_eligibility_evidence: row.matched_context || row.snippet || '',
+      notes: `Discovered by ${row.discovery_method || 'monitor'}; confidence ${row.confidence_score ?? '—'}; source status: ${row.source_status || '—'}.`
+    })
+    setMessage('Candidate loaded into the vacancy form. Verify the official notification before publishing.')
+    setError('')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+  async function rejectCandidate(row) {
+    setBusy(true); setError(''); setMessage('')
+    const { error } = await sb.from('vacancy_candidates').update({ review_status: 'Rejected' }).eq('id', row.id)
+    if (error) setError(error.message)
+    else { setMessage('Candidate rejected.'); await loadCandidates() }
     setBusy(false)
   }
   async function remove(row) {
@@ -186,6 +216,9 @@ export default function AdminPage() {
       </div>
       <div className="formActions"><button type="button" className="secondaryBtn" onClick={resetForm}>Clear</button><button className="primaryBtn" disabled={busy}>{busy ? 'Saving…' : editingId ? 'Update vacancy' : 'Add vacancy'}</button></div>
     </form>
+    <section className="adminCard"><div className="formHead"><div><h2>Candidate review queue</h2><p>{candidates.length} discovered candidates waiting for admin verification.</p></div></div>
+      <div className="adminTableWrap"><table><thead><tr><th>Candidate</th><th>Confidence</th><th>Source</th><th>Deadline</th><th>Review</th></tr></thead><tbody>{candidates.length ? candidates.map(r=><tr key={r.id}><td><b>{r.title}</b><small>{r.matched_keywords || 'Foundryman-related match'}</small></td><td>{r.confidence_score ?? '—'}</td><td>{r.source_status || r.discovery_method || '—'}</td><td>{r.deadline_text || 'Not detected'}</td><td><div className="tableActions"><button type="button" onClick={()=>reviewCandidate(r)}>Load to form</button><button type="button" className="dangerBtn" onClick={()=>rejectCandidate(r)} disabled={busy}>Reject</button></div></td></tr>) : <tr><td colSpan="5" className="empty">No pending candidates.</td></tr>}</tbody></table></div>
+    </section>
     <section className="adminCard"><div className="formHead"><div><h2>Existing vacancies</h2><p>{filteredRows.length} of {rows.length} records shown. {stats.apprenticeships} apprenticeship records.</p></div></div>
       <div className="toolbar"><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search post, organization, ID, state…"/><select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}><option>All</option><option>Open</option><option>Closed</option><option>Under Review</option><option>Withdrawn</option><option>Rejected</option></select><select value={verificationFilter} onChange={e=>setVerificationFilter(e.target.value)}><option>All</option><option>Verified - Official Doc</option><option>Verified</option><option>Pending</option><option>Unverified</option><option>Not Foundryman Eligible</option></select><select value={jobTypeFilter} onChange={e=>setJobTypeFilter(e.target.value)}><option>All</option><option>Permanent</option><option>Contract</option><option>Apprenticeship</option><option>Temporary</option><option>Other</option><option>Full-Time</option></select></div>
       <div className="adminTableWrap"><table><thead><tr><th>Post</th><th>Organization</th><th>Status</th><th>Verification</th><th>Deadline</th><th>Actions</th></tr></thead><tbody>{filteredRows.length ? filteredRows.map(r=><tr key={r.id}><td><b>{r.post}</b><small>{r.vacancy_id}</small></td><td>{r.organization}</td><td><StatusBadge status={r.status}/></td><td>{r.verification_status}</td><td><Deadline date={r.last_date} status={r.status}/></td><td><div className="tableActions"><button type="button" onClick={()=>edit(r)}>Edit</button><button type="button" className="dangerBtn" onClick={()=>remove(r)} disabled={busy}>Delete</button></div></td></tr>) : <tr><td colSpan="6" className="empty">No vacancies match the current filters.</td></tr>}</tbody></table></div>
