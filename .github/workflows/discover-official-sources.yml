@@ -1,0 +1,24 @@
+name: Discover official government sources
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 1 * * 0'
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Discover official sources
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          node scripts/discover-official-sources.mjs
