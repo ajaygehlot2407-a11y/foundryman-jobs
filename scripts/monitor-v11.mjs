@@ -196,7 +196,7 @@ function strategy(source){
 }
 
 async function processSource(source,run,state){
-  const urls=[source.recruitment_url,source.official_url].filter((u,i,a)=>http(u)&&a.indexOf(u)===i);
+  const urls=[...(Array.isArray(source.alternate_urls)?source.alternate_urls:[]),source.recruitment_url,source.official_url].filter((u,i,a)=>http(u)&&a.indexOf(u)===i);
   if(!urls.length){state.errors++;return;}
   const st=strategy(source), q=[],seen=new Set(),queued=new Set(),hosts=new Set(urls.map(host)); 
   const push=(url,title="",depth=0,isRoot=false)=>{if(!url||!http(url)||queued.has(url)||seen.has(url))return;const h=host(url);if(![...hosts].some(x=>h===x||h.endsWith("."+x)||x.endsWith("."+h)))return;queued.add(url);q.push({url,title,depth,isRoot});};
