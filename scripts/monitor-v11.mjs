@@ -9,6 +9,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) process.exit(1);
 const REST = `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1`;
 const MODE = (process.env.MONITOR_MODE || "full").toLowerCase();
 const SOURCE_LIMIT = Number(process.env.SOURCE_LIMIT || 0);
+const SOURCE_OFFSET = Number(process.env.SOURCE_OFFSET || 0);
 const SOURCE_NAMES = (process.env.SOURCE_NAMES || "").split(",").map(s=>s.trim().toLowerCase()).filter(Boolean);
 
 const CFG = {
@@ -322,6 +323,7 @@ async function main(){
   let sources=await get("source_registry?active=eq.true&select=*&order=priority.asc","load sources");
   if(!Array.isArray(sources))throw new Error("source registry not array");
   if(SOURCE_NAMES.length)sources=sources.filter(s=>SOURCE_NAMES.some(n=>(s.source_name||"").toLowerCase().includes(n)));
+  if(SOURCE_OFFSET>0)sources=sources.slice(SOURCE_OFFSET);
   if(SOURCE_LIMIT>0)sources=sources.slice(0,SOURCE_LIMIT);
   if(MODE==="official-test")sources=sources.slice(0,Math.min(sources.length,SOURCE_LIMIT||8));
   const run0=await post("monitoring_runs",{started_at:new Date().toISOString(),status:"Running",sources_checked:0,pages_scanned:0,candidates_found:0,errors_count:0,notes:`V11.0 targeted discovery mode=${MODE}`},"create run");
