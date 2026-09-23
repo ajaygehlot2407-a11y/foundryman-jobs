@@ -83,3 +83,23 @@ where active = true;
 select source_name, alternate_urls
 from public.source_registry
 where jsonb_array_length(alternate_urls) > 0;
+
+
+-- V11.3: admin review queue access for discovered candidates.
+alter table if exists public.vacancy_candidates enable row level security;
+
+drop policy if exists "Admins can read vacancy candidates" on public.vacancy_candidates;
+drop policy if exists "Admins can update vacancy candidates" on public.vacancy_candidates;
+
+create policy "Admins can read vacancy candidates"
+on public.vacancy_candidates
+for select
+to authenticated
+using (public.is_admin());
+
+create policy "Admins can update vacancy candidates"
+on public.vacancy_candidates
+for update
+to authenticated
+using (public.is_admin())
+with check (public.is_admin());
