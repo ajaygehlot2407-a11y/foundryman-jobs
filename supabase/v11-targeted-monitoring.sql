@@ -18,3 +18,35 @@ set notes = coalesce(notes,'') || case when coalesce(notes,'') like '%V11 target
 where active = true;
 
 select 'V11 migration ready' as message;
+
+
+-- V11.1 candidate quality + deduplication.
+-- Remove exact duplicate fingerprints before enforcing uniqueness.
+delete from public.vacancy_candidates a
+using public.vacancy_candidates b
+where a.fingerprint is not null
+  and a.fingerprint = b.fingerprint
+  and a.id > b.id;
+
+create unique index if not exists uq_vacancy_candidates_fingerprint
+  on public.vacancy_candidates(fingerprint)
+  where fingerprint is not null;
+
+-- Public source directory: exposes only the fields needed by the public Sources page.
+create or replace view public.source_directory as
+select
+  id,
+  source_name,
+  organization,
+  official_url,
+  recruitment_url,
+  source_type,
+  coverage,
+  priority,
+  active,
+  notes,
+  last_checked,
+  last_status
+from public.source_registry;
+
+grant select on public.source_directory to anon, authenticated;
