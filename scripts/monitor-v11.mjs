@@ -20,6 +20,7 @@ const CFG = {
   curlTimeout: 14,
   maxPdfBytes: 25 * 1024 * 1024,
   maxLinksPerPage: 100,
+  sourceBudgetMs: 120000,
   userAgent: "FoundrymanJobsMonitor/11.0 (targeted-discovery)",
   foundry: [
     "foundryman","foundry man","foundry-man","moulder","molder",
@@ -50,7 +51,8 @@ async function withDomainLock(url, fn){
   const prev=domainLocks.get(h)||Promise.resolve();
   let release;
   const gate=new Promise(r=>{release=r});
-  domainLocks.set(h,prev.then(()=>gate));
+  const queued=prev.then(()=>gate);
+  domainLocks.set(h,queued);
   await prev;
   try{
     const next=domainNextAt.get(h)||0;
@@ -59,7 +61,7 @@ async function withDomainLock(url, fn){
     return await fn();
   }finally{
     release();
-    if(domainLocks.get(h)===gate)domainLocks.delete(h);
+    if(domainLocks.get(h)===queued)domainLocks.delete(h);
   }
 }
 function transientError(err){
@@ -260,13 +262,21 @@ function strategy(source){
 }
 
 async function processSource(source,run,state){
+  const started=Date.now();
   const urls=[...(Array.isArray(source.alternate_urls)?source.alternate_urls:[]),source.recruitment_url,source.official_url].filter((u,i,a)=>http(u)&&a.indexOf(u)===i);
   if(!urls.length){state.errors++;return;}
   const st=strategy(source), q=[],seen=new Set(),queued=new Set(),hosts=new Set(urls.map(host)); 
   const push=(url,title="",depth=0,isRoot=false)=>{if(!url||!http(url)||queued.has(url)||seen.has(url))return;const h=host(url);if(![...hosts].some(x=>h===x||h.endsWith("."+x)||x.endsWith("."+h)))return;queued.add(url);q.push({url,title,depth,isRoot});};
   urls.forEach(u=>push(u,"Recruitment",0,true));
   let pages=0,errors=0,warnings=0;
+  console.log(`[SOURCE-START] ${source.source_name} targets=${urls.length} maxPages=${st.pages}`);
   while(q.length&&pages<st.pages){
+    if(Date.now()-started>=CFG.sourceBudgetMs){
+      warnings++;
+      state.warnings++;
+      console.log(`[SOURCE-TIMEOUT] ${source.source_name} budget=${CFG.sourceBudgetMs}ms pages=${pages}`);
+      break;
+    }
     q.sort((a,b)=>(b.isRoot-a.isRoot)||(b.depth-a.depth?0:linkRank({text:b.title,url:b.url})-linkRank({text:a.title,url:a.url})));
     const r=q.shift();if(seen.has(r.url))continue;seen.add(r.url);
     try{
