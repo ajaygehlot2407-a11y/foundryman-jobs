@@ -1,13 +1,10 @@
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
-
-const execFileAsync = promisify(execFile)
-
 const SUPABASE_URL = process.env.SUPABASE_URL?.replace(/\/$/, '')
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 
 if (!SUPABASE_URL || !SERVICE_KEY) {
-  throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY')
+  throw new Error(
+    'Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY'
+  )
 }
 
 const headers = {
@@ -37,7 +34,6 @@ const ALLOWED_HOST_PATTERNS = [
   /\.ac\.in$/i,
   /\.edu\.in$/i,
   /\.org\.in$/i,
-  /^psu/i,
 ]
 
 const DISCOVERY_KEYWORDS = [
@@ -74,42 +70,65 @@ async function api(path, options = {}) {
   )
 
   if (!response.ok) {
+    const body = await response.text()
+
     throw new Error(
-      `${response.status} ${await response.text()}`
+      `${response.status} ${body.slice(0, 500)}`
     )
   }
 
-  return response.status === 204
-    ? null
-    : response.json()
+  if (response.status === 204) {
+    return null
+  }
+
+  const text = await response.text()
+
+  if (!text.trim()) {
+    return null
+  }
+
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(
+      `Invalid JSON response (${response.status}): ${text.slice(0, 300)}`
+    )
+  }
 }
 
 async function fetchText(url) {
-  const controller = new AbortController()
+  const controller =
+    new AbortController()
+
   const timer = setTimeout(
     () => controller.abort(),
     REQUEST_TIMEOUT_MS
   )
 
   try {
-    const response = await fetch(url, {
-      redirect: 'follow',
-      signal: controller.signal,
-      headers: {
-        'user-agent':
-          'Mozilla/5.0 (compatible; FoundrymanSourceDiscovery/1.0)',
-        accept:
-          'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5',
-      },
-    })
+    const response =
+      await fetch(url, {
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: {
+          'user-agent':
+            'Mozilla/5.0 (compatible; FoundrymanSourceDiscovery/2.0)',
+          accept:
+            'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5',
+        },
+      })
 
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
+      throw new Error(
+        `HTTP ${response.status}`
+      )
     }
 
     return {
-      finalUrl: response.url || url,
-      body: await response.text(),
+      finalUrl:
+        response.url || url,
+      body:
+        await response.text(),
     }
   } finally {
     clearTimeout(timer)
@@ -118,10 +137,16 @@ async function fetchText(url) {
 
 function normalizeUrl(raw, base) {
   try {
-    const url = new URL(raw, base)
+    const url =
+      new URL(raw, base)
+
     url.hash = ''
 
-    if (!/^https?:$/i.test(url.protocol)) {
+    if (
+      !/^https?:$/i.test(
+        url.protocol
+      )
+    ) {
       return null
     }
 
@@ -133,22 +158,30 @@ function normalizeUrl(raw, base) {
 
 function allowedHost(url) {
   try {
-    const hostname = new URL(url).hostname.toLowerCase()
+    const hostname =
+      new URL(url)
+        .hostname
+        .toLowerCase()
 
-    return ALLOWED_HOST_PATTERNS.some((pattern) =>
-      pattern.test(hostname)
+    return ALLOWED_HOST_PATTERNS.some(
+      (pattern) =>
+        pattern.test(hostname)
     )
   } catch {
     return false
   }
 }
 
-function looksRelevant(url, title = '') {
+function looksRelevant(
+  url,
+  title = ''
+) {
   const haystack =
     `${title} ${url}`.toLowerCase()
 
-  return DISCOVERY_KEYWORDS.some((keyword) =>
-    haystack.includes(keyword)
+  return DISCOVERY_KEYWORDS.some(
+    (keyword) =>
+      haystack.includes(keyword)
   )
 }
 
@@ -159,7 +192,10 @@ function cleanTitle(value) {
     .trim()
 }
 
-function extractLinks(html, baseUrl) {
+function extractLinks(
+  html,
+  baseUrl
+) {
   const links = []
   const seen = new Set()
 
@@ -168,14 +204,25 @@ function extractLinks(html, baseUrl) {
 
   let match
 
-  while ((match = regex.exec(html)) !== null) {
-    const url = normalizeUrl(match[1], baseUrl)
+  while (
+    (match = regex.exec(html)) !== null
+  ) {
+    const url =
+      normalizeUrl(
+        match[1],
+        baseUrl
+      )
 
-    if (!url || !allowedHost(url)) {
+    if (
+      !url ||
+      !allowedHost(url)
+    ) {
       continue
     }
 
-    if (seen.has(url)) {
+    if (
+      seen.has(url)
+    ) {
       continue
     }
 
@@ -183,7 +230,8 @@ function extractLinks(html, baseUrl) {
 
     links.push({
       url,
-      title: cleanTitle(match[2]),
+      title:
+        cleanTitle(match[2]),
     })
   }
 
@@ -203,58 +251,64 @@ async function upsertSource({
     title ||
     new URL(url).hostname
 
-  const recruitmentUrl =
-    looksRelevant(url, title)
-      ? url
-      : url
-
   const payload = {
     source_name:
       sourceName.slice(0, 250),
-    official_url: url,
-    recruitment_url: recruitmentUrl,
+
+    official_url:
+      url,
+
+    recruitment_url:
+      url,
+
     search_keywords:
       'recruitment,career,vacancy,job,employment,notification,apprentice,foundryman,moulder,molder',
-    active: true,
-    priority: 30,
+
+    active:
+      true,
+
+    priority:
+      30,
+
     source_type:
       directory.type,
+
     organization_name:
       sourceName.slice(0, 250),
+
     discovery_method:
       directory.method,
+
     source_key:
       makeSourceKey(url),
   }
 
-  try {
-    await api('source_registry', {
-      method: 'POST',
-      headers: {
-        Prefer: 'return=minimal',
-      },
-      body: JSON.stringify(payload),
-    })
+  const response =
+    await api(
+      'source_registry',
+      {
+        method: 'POST',
 
-    return true
-  } catch (error) {
-    const message =
-      String(error.message || '').toLowerCase()
+        headers: {
+          Prefer:
+            'return=minimal',
+        },
 
-    if (
-      message.includes('duplicate') ||
-      message.includes('unique constraint') ||
-      message.includes('already exists') ||
-      message.includes('23505')
-    ) {
-      return false
-    }
+        body:
+          JSON.stringify(
+            payload
+          ),
+      }
+    )
 
-    throw error
-  }
+  return response !== undefined
 }
 
 async function main() {
+  console.log(
+    '=== FOUNDRYMAN SOURCE DISCOVERY V8.1 ==='
+  )
+
   const existing =
     await api(
       'source_registry?select=official_url'
@@ -262,9 +316,11 @@ async function main() {
 
   const existingUrls =
     new Set(
-      existing
+      (existing || [])
         .map((row) =>
-          String(row.official_url || '')
+          String(
+            row.official_url || ''
+          )
             .toLowerCase()
             .replace(/\/$/, '')
         )
@@ -276,22 +332,29 @@ async function main() {
   let skipped = 0
   let errors = 0
 
-  for (const directory of DIRECTORY_SOURCES) {
+  for (
+    const directory
+    of DIRECTORY_SOURCES
+  ) {
+    console.log('')
     console.log(
-      `\n=== ${directory.name} ===`
+      `=== ${directory.name} ===`
     )
 
     let result
 
     try {
-      result = await fetchText(
-        directory.url
-      )
+      result =
+        await fetchText(
+          directory.url
+        )
     } catch (error) {
       errors++
+
       console.error(
         `[DIRECTORY ERROR] ${directory.url}: ${error.message}`
       )
+
       continue
     }
 
@@ -305,7 +368,10 @@ async function main() {
       `[DISCOVERED LINKS] ${links.length}`
     )
 
-    for (const link of links) {
+    for (
+      const link
+      of links
+    ) {
       if (
         !looksRelevant(
           link.url,
@@ -323,56 +389,110 @@ async function main() {
           .replace(/\/$/, '')
 
       if (
-        existingUrls.has(normalized)
+        existingUrls.has(
+          normalized
+        )
       ) {
         skipped++
         continue
       }
 
       try {
-        const wasInserted =
-          await upsertSource({
-            url: link.url,
-            title: link.title,
-            directory,
-          })
+        await upsertSource({
+          url:
+            link.url,
 
-        if (wasInserted) {
-          inserted++
+          title:
+            link.title,
+
+          directory,
+        })
+
+        inserted++
+
+        existingUrls.add(
+          normalized
+        )
+
+        console.log(
+          `[ADDED] ${link.title || link.url}`
+        )
+      } catch (error) {
+        const message =
+          String(
+            error.message || ''
+          )
+
+        if (
+          message.includes(
+            '23505'
+          ) ||
+          message
+            .toLowerCase()
+            .includes(
+              'duplicate'
+            ) ||
+          message
+            .toLowerCase()
+            .includes(
+              'unique constraint'
+            )
+        ) {
+          skipped++
+
           existingUrls.add(
             normalized
           )
 
           console.log(
-            `[ADDED] ${link.title || link.url}`
+            `[SKIPPED DUPLICATE] ${link.url}`
           )
         } else {
-          skipped++
-        }
-      } catch (error) {
-        errors++
+          errors++
 
-        console.error(
-          `[INSERT ERROR] ${link.url}: ${error.message}`
-        )
+          console.error(
+            `[INSERT ERROR] ${link.url}: ${message}`
+          )
+        }
       }
     }
   }
 
-  console.log('\n=== SOURCE DISCOVERY SUMMARY ===')
+  console.log('')
   console.log(
-    JSON.stringify({
-      discovered,
-      inserted,
-      skipped,
-      errors,
-    })
+    '=== SOURCE DISCOVERY SUMMARY ==='
   )
+
+  console.log(
+    JSON.stringify(
+      {
+        discovered,
+        inserted,
+        skipped,
+        errors,
+      },
+      null,
+      2
+    )
+  )
+
+  if (errors > 0) {
+    console.log(
+      `Discovery completed with ${errors} error(s).`
+    )
+  } else {
+    console.log(
+      'Discovery completed without errors.'
+    )
+  }
 }
 
-main().catch((error) => {
-  console.error(
-    `[FATAL] ${error.message}`
-  )
-  process.exit(1)
-})
+main().catch(
+  (error) => {
+    console.error(
+      `[FATAL] ${error.message}`
+    )
+
+    process.exit(1)
+  }
+)
