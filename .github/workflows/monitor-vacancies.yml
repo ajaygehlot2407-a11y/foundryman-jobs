@@ -3,8 +3,20 @@ name: Foundryman vacancy monitor
 on:
   schedule:
     - cron: "30 2 * * *"
-
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "full = official + aggregators; official-only = official sources only; official-test = controlled test"
+        required: false
+        default: "full"
+      source_limit:
+        description: "0 = all active sources"
+        required: false
+        default: "0"
+      source_names:
+        description: "Optional comma-separated source-name fragments"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -12,63 +24,30 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-
-    timeout-minutes: 45
-
+    timeout-minutes: 60
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
+      MONITOR_MODE: ${{ inputs.mode || 'full' }}
+      SOURCE_LIMIT: ${{ inputs.source_limit || '0' }}
+      SOURCE_NAMES: ${{ inputs.source_names || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
           node-version: "24.x"
-
-      - name: Verify Node
-        run: |
-          node --version
-          npm --version
-
       - name: Install PDF tools
         run: |
           sudo apt-get update
           sudo apt-get install -y poppler-utils curl
-          pdftotext -v
-          curl --version
-
-      - name: Run source monitor
+      - name: Run V11 targeted monitor
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -o pipefail
-
-          echo "=========================================="
-          echo "Starting Foundryman V10.3 monitor"
-          echo "=========================================="
-
-          node scripts/monitor-sources.mjs 2>&1 | tee monitor-output.log
-
-      - name: Show complete monitor log
+          node scripts/monitor-v11.mjs 2>&1 | tee monitor-output.log
+      - name: Show log
         if: always()
-        run: |
-          echo "=========================================="
-          echo "COMPLETE MONITOR LOG"
-          echo "=========================================="
-
-          if [ -f monitor-output.log ]; then
-            cat monitor-output.log
-          else
-            echo "monitor-output.log was not created"
-          fi
-
-          echo "=========================================="
-          echo "END MONITOR LOG"
-
-          echo "=========================================="
-          echo "GitHub Step Summary has the error breakdown."
-          echo "=========================================="
-          echo "=========================================="
+        run: cat monitor-output.log || true
