@@ -88,9 +88,11 @@ function termsIn(text, terms=CFG.foundry) {
   return terms.filter(t=>l.includes(t));
 }
 function score(title,url,text) {
-  const a=(clean(title)+" "+url+" "+clean(text)).toLowerCase(), head=(clean(title)+" "+url).toLowerCase();
-  const strongHit=CFG.strong.some(t=>head.includes(t)), recruitHit=CFG.recruitment.some(t=>a.includes(t)), tradeHit=/\b(iti|ncvt|scvt|ntc|nac|apprentice|trade certificate)\b/i.test(a);
-  let s=strongHit?55:(a.includes("foundry")?25:0);
+  const a=(clean(title)+" "+url+" "+clean(text)).toLowerCase(), head=(clean(title)+" "+url).toLowerCase(), body=clean(text).toLowerCase();
+  const strongHead=CFG.strong.some(t=>head.includes(t)), strongBody=CFG.strong.some(t=>body.includes(t));
+  const foundryEvidence=CFG.foundry.some(t=>a.includes(t));
+  const recruitHit=CFG.recruitment.some(t=>a.includes(t)), tradeHit=/\b(iti|ncvt|scvt|ntc|nac|apprentice|trade certificate)\b/i.test(a);
+  let s=strongHead?55:(strongBody?45:(foundryEvidence?25:0));
   if(recruitHit)s+=15; if(tradeHit)s+=15; if(pdf(url))s+=5; if(isClosed(text))s-=10;
   return Math.max(0,Math.min(100,s));
 }
@@ -234,7 +236,9 @@ async function candidate({sourceId,runId,sourceName,organization="",url,title,te
   const matched=termsIn(title+" "+url+" "+text), head=(clean(title)+" "+url).toLowerCase(), body=clean(text).toLowerCase();
   const strongHit=CFG.strong.some(t=>head.includes(t)), recruit=CFG.recruitment.some(t=>body.includes(t)||clean(title).toLowerCase().includes(t));
   const trade=/\b(iti|ncvt|scvt|ntc|nac|apprentice|trade certificate)\b/i.test(body), sc=score(title,url,text);
-  if(matched.length===0 || (!strongHit && !(recruit&&trade) && sc<60))return false;
+  const bodyStrongHit=CFG.strong.some(t=>body.includes(t));
+  const foundryRecruitTrade=CFG.foundry.some(t=>body.includes(t)) && recruit && trade;
+  if(matched.length===0 || (!strongHit && !bodyStrongHit && !foundryRecruitTrade && sc<60))return false;
   if(CFG.exclude.some(x=>head.includes(x))&&!strongHit)return false;
   const canonical=canonicalUrl(url), fp=fingerprint(canonical,title,organization);
   const existing=await get("vacancy_candidates?select=id&fingerprint=eq."+encodeURIComponent(fp)+"&limit=1","candidate dedupe").catch(()=>[]);
