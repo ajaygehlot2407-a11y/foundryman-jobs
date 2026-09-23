@@ -12,23 +12,23 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 const REST_URL = `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1`;
 
 const CONFIG = {
-  MAX_PAGES_PER_SOURCE: 8,
-  MAX_LINKS_PER_PAGE: 120,
+  MAX_PAGES_PER_SOURCE: 4,
+  MAX_LINKS_PER_PAGE: 40,
   MAX_PDF_BYTES: 20 * 1024 * 1024,
 
-  SOURCE_TIMEOUT_MS: 22000,
-  PAGE_TIMEOUT_MS: 20000,
-  CURL_TIMEOUT_SECONDS: 25,
+  SOURCE_TIMEOUT_MS: 12000,
+  PAGE_TIMEOUT_MS: 8000,
+  CURL_TIMEOUT_SECONDS: 8,
 
-  SOURCE_RETRIES: 2,
-  PAGE_RETRIES: 2,
+  SOURCE_RETRIES: 1,
+  PAGE_RETRIES: 1,
 
-  CONCURRENCY: 6,
+  CONCURRENCY: 10,
 
   USER_AGENT:
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
     "(KHTML, like Gecko) Chrome/131.0 Safari/537.36 " +
-    "FoundrymanJobsMonitor/10.2",
+    "FoundrymanJobsMonitor/10.3",
 
   DISCOVERY_TERMS: [
     "foundryman",
@@ -580,6 +580,15 @@ async function fetchResource(
     }
   }
 
+  const lastMessage = formatError(lastError).toLowerCase();
+  const shouldTryCurl =
+    !lastMessage.includes("timeout") &&
+    !lastMessage.includes("abort");
+
+  if (!shouldTryCurl) {
+    throw lastError || new Error("fetch timed out");
+  }
+
   console.log(`[CURL] ${label}: trying curl fallback`);
 
   try {
@@ -620,7 +629,7 @@ async function fetchSupabaseJson(
     Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
     Accept: "application/json",
     "Content-Type": "application/json",
-    "User-Agent": "FoundrymanJobsMonitor/10.2",
+    "User-Agent": "FoundrymanJobsMonitor/10.3",
     ...(options.headers || {}),
   };
 
@@ -737,12 +746,29 @@ async function supabasePatch(path, body, label) {
 }
 
 function shouldCrawlLink(link) {
-  const combined =
-    `${link.text || ""} ${link.url || ""}`.toLowerCase();
+  const text = String(link.text || "").toLowerCase();
+  const url = String(link.url || "").toLowerCase();
+  const combined = text + " " + url;
 
-  return CONFIG.RECRUITMENT_TERMS.some((term) =>
-    combined.includes(term)
-  );
+  const excludedTerms = [
+    "result", "results", "applicant-list", "applicant list",
+    "answer-key", "answer key", "admit-card", "admit card",
+    "scrutiny", "corrigendum", "withdrawal", "cancellation",
+    "seniority", "marks", "merit-list", "merit list"
+  ];
+
+  if (excludedTerms.some((term) => combined.includes(term))) {
+    return false;
+  }
+
+  const crawlTerms = [
+    "recruitment", "recruit", "vacancy", "vacancies",
+    "career", "careers", "job", "jobs", "advertisement",
+    "advt", "notification", "engagement", "apprentice",
+    "apprenticeship"
+  ];
+
+  return crawlTerms.some((term) => combined.includes(term));
 }
 
 function shouldInspectPage(page) {
@@ -1254,7 +1280,7 @@ async function runWithConcurrency(
 
 async function main() {
   console.log("==============================================");
-  console.log("FOUNDRYMAN VACANCY MONITOR V10.2");
+  console.log("FOUNDRYMAN VACANCY MONITOR V10.3");\n  console.log("Fast profile: bounded crawl + timeout-aware fallback");
   console.log("==============================================");
   console.log(
     `Max pages/source: ${CONFIG.MAX_PAGES_PER_SOURCE}`
@@ -1310,7 +1336,7 @@ async function main() {
         pages_scanned: 0,
         candidates_found: 0,
         errors_count: 0,
-        notes: "V10.2 diagnostic monitor started",
+        notes: "V10.3 fast diagnostic monitor started",
       },
       "create monitoring run"
     );
