@@ -28,7 +28,7 @@ const CONFIG = {
   USER_AGENT:
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
     "(KHTML, like Gecko) Chrome/131.0 Safari/537.36 " +
-    "FoundrymanJobsMonitor/10.3",
+    "FoundrymanJobsMonitor/10.4",
 
   DISCOVERY_TERMS: [
     "foundryman",
@@ -445,9 +445,8 @@ function runCurl(url) {
       "--compressed",
       "--silent",
       "--show-error",
-      "--fail-with-body",
       "--connect-timeout",
-      "12",
+      "6",
       "--max-time",
       String(CONFIG.CURL_TIMEOUT_SECONDS),
 
@@ -1280,7 +1279,7 @@ async function runWithConcurrency(
 
 async function main() {
   console.log("==============================================");
-  console.log("FOUNDRYMAN VACANCY MONITOR V10.3");
+  console.log("FOUNDRYMAN VACANCY MONITOR V10.4");
   console.log("Fast profile: bounded crawl + timeout-aware fallback");
   console.log("==============================================");
   console.log(
@@ -1337,7 +1336,7 @@ async function main() {
         pages_scanned: 0,
         candidates_found: 0,
         errors_count: 0,
-        notes: "V10.3 fast diagnostic monitor started",
+        notes: "V10.4 curl-status monitor started",
       },
       "create monitoring run"
     );
