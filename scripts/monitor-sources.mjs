@@ -7,7 +7,9 @@ const SUPABASE_URL = process.env.SUPABASE_URL?.replace(/\/$/, '')
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 
 if (!SUPABASE_URL || !SERVICE_KEY) {
-  throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY')
+  throw new Error(
+    'Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY'
+  )
 }
 
 const headers = {
@@ -52,23 +54,32 @@ const DISCOVERY_PAGE_TERMS = [
 ]
 
 async function api(path, opts = {}) {
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
-    ...opts,
-    headers: {
-      ...headers,
-      ...(opts.headers || {}),
-    },
-  })
+  const response = await fetch(
+    `${SUPABASE_URL}/rest/v1/${path}`,
+    {
+      ...opts,
+      headers: {
+        ...headers,
+        ...(opts.headers || {}),
+      },
+    }
+  )
 
   if (!response.ok) {
-    throw new Error(`${response.status} ${await response.text()}`)
+    throw new Error(
+      `${response.status} ${await response.text()}`
+    )
   }
 
-  return response.status === 204 ? null : response.json()
+  return response.status === 204
+    ? null
+    : response.json()
 }
 
 function esc(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim()
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 function terms(value) {
@@ -94,7 +105,10 @@ function isHttpUrl(url) {
 
 function isSameHost(url, baseUrl) {
   try {
-    return new URL(url).hostname === new URL(baseUrl).hostname
+    return (
+      new URL(url).hostname ===
+      new URL(baseUrl).hostname
+    )
   } catch {
     return false
   }
@@ -105,7 +119,8 @@ function isPdf(url) {
 }
 
 function looksLikeRelevantPage(title, url) {
-  const haystack = `${title} ${url}`.toLowerCase()
+  const haystack =
+    `${title} ${url}`.toLowerCase()
 
   return DISCOVERY_PAGE_TERMS.some((term) =>
     haystack.includes(term)
@@ -115,9 +130,18 @@ function looksLikeRelevantPage(title, url) {
 function extractPageText(html) {
   return esc(
     String(html || '')
-      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+      .replace(
+        /<script[\s\S]*?<\/script>/gi,
+        ' '
+      )
+      .replace(
+        /<style[\s\S]*?<\/style>/gi,
+        ' '
+      )
+      .replace(
+        /<noscript[\s\S]*?<\/noscript>/gi,
+        ' '
+      )
       .replace(/<[^>]+>/g, ' ')
   )
 }
@@ -125,7 +149,9 @@ function extractPageText(html) {
 function findKeywordMatches(text, keywordList) {
   const lower = String(text || '').toLowerCase()
 
-  return keywordList.filter((term) => lower.includes(term))
+  return keywordList.filter((term) =>
+    lower.includes(term)
+  )
 }
 
 function extractLinks(html, baseUrl) {
@@ -138,15 +164,22 @@ function extractLinks(html, baseUrl) {
   let match
 
   while ((match = regex.exec(html)) !== null) {
-    const href = normalizeUrl(match[1], baseUrl)
+    const href = normalizeUrl(
+      match[1],
+      baseUrl
+    )
 
-    if (!href || !isHttpUrl(href)) continue
+    if (!href || !isHttpUrl(href)) {
+      continue
+    }
 
     const title = esc(
       match[2].replace(/<[^>]+>/g, ' ')
     )
 
-    if (!title || seen.has(href)) continue
+    if (!title || seen.has(href)) {
+      continue
+    }
 
     seen.add(href)
 
@@ -155,59 +188,148 @@ function extractLinks(html, baseUrl) {
       title,
     })
 
-    if (output.length >= MAX_LINKS_PER_PAGE) break
+    if (
+      output.length >=
+      MAX_LINKS_PER_PAGE
+    ) {
+      break
+    }
   }
 
   return output
 }
 
-function getContext(text, keyword, radius = 180) {
+function getContext(
+  text,
+  keyword,
+  radius = 180
+) {
   const source = String(text || '')
   const lower = source.toLowerCase()
-  const index = lower.indexOf(keyword.toLowerCase())
 
-  if (index === -1) return ''
+  const index = lower.indexOf(
+    keyword.toLowerCase()
+  )
 
-  const start = Math.max(0, index - radius)
+  if (index === -1) {
+    return ''
+  }
+
+  const start = Math.max(
+    0,
+    index - radius
+  )
+
   const end = Math.min(
     source.length,
     index + keyword.length + radius
   )
 
-  return esc(source.slice(start, end))
+  return esc(
+    source.slice(start, end)
+  )
+}
+
+function formatError(error) {
+  if (!error) {
+    return 'Unknown error'
+  }
+
+  const parts = []
+
+  if (error.name) {
+    parts.push(`name=${error.name}`)
+  }
+
+  if (error.code) {
+    parts.push(`code=${error.code}`)
+  }
+
+  if (error.type) {
+    parts.push(`type=${error.type}`)
+  }
+
+  if (error.message) {
+    parts.push(`message=${error.message}`)
+  }
+
+  if (error.cause?.code) {
+    parts.push(
+      `cause_code=${error.cause.code}`
+    )
+  }
+
+  if (error.cause?.message) {
+    parts.push(
+      `cause_message=${error.cause.message}`
+    )
+  }
+
+  if (error.stderr) {
+    parts.push(
+      `stderr=${esc(error.stderr).slice(0, 500)}`
+    )
+  }
+
+  if (error.stdout) {
+    parts.push(
+      `stdout=${esc(error.stdout).slice(0, 500)}`
+    )
+  }
+
+  return parts.join(' | ')
 }
 
 async function fetchWithNode(url) {
-  let lastError
+  let lastError = null
 
-  for (let attempt = 1; attempt <= MAX_FETCH_RETRIES; attempt++) {
-    const controller = new AbortController()
+  for (
+    let attempt = 1;
+    attempt <= MAX_FETCH_RETRIES;
+    attempt++
+  ) {
+    const controller =
+      new AbortController()
 
     const timer = setTimeout(
-      () => controller.abort(),
+      () =>
+        controller.abort(),
       REQUEST_TIMEOUT_MS
     )
 
     try {
-      const response = await fetch(url, {
-        redirect: 'follow',
-        signal: controller.signal,
-        headers: {
-          'user-agent':
-            'Mozilla/5.0 (compatible; FoundrymanJobsMonitor/2.0)',
-          accept:
-            'text/html,application/xhtml+xml,application/pdf,text/plain;q=0.9,*/*;q=0.5',
-        },
-      })
+      console.log(
+        `[NODE] ${url} attempt ${attempt}/${MAX_FETCH_RETRIES}`
+      )
+
+      const response =
+        await fetch(url, {
+          redirect: 'follow',
+          signal: controller.signal,
+          headers: {
+            'user-agent':
+              'Mozilla/5.0 (compatible; FoundrymanJobsMonitor/3.0)',
+            accept:
+              'text/html,application/xhtml+xml,application/pdf,text/plain;q=0.9,*/*;q=0.5',
+          },
+        })
 
       const contentType =
-        response.headers.get('content-type') || ''
+        response.headers.get(
+          'content-type'
+        ) || ''
 
-      const body = await response.text()
+      const body =
+        await response.text()
+
+      console.log(
+        `[NODE-RESULT] ${url} -> HTTP ${response.status}, final=${response.url}, type=${contentType}`
+      )
 
       return {
         status: response.status,
-        finalUrl: response.url || url,
+        finalUrl:
+          response.url || url,
         contentType,
         body,
         method: 'node-fetch',
@@ -216,12 +338,16 @@ async function fetchWithNode(url) {
       lastError = error
 
       console.log(
-        `[RETRY] ${url} attempt ${attempt}/${MAX_FETCH_RETRIES}: ${error.message}`
+        `[NODE-ERROR] ${url} -> ${formatError(error)}`
       )
 
-      if (attempt < MAX_FETCH_RETRIES) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, 1500)
+      if (
+        attempt <
+        MAX_FETCH_RETRIES
+      ) {
+        await new Promise(
+          (resolve) =>
+            setTimeout(resolve, 1500)
         )
       }
     } finally {
@@ -229,7 +355,8 @@ async function fetchWithNode(url) {
     }
   }
 
-  throw lastError || new Error('fetch failed')
+  throw lastError ||
+    new Error('Node fetch failed')
 }
 
 async function fetchWithCurl(url) {
@@ -241,8 +368,10 @@ async function fetchWithCurl(url) {
     '20',
     '--connect-timeout',
     '10',
+    '--retry',
+    '1',
     '-A',
-    'Mozilla/5.0 (compatible; FoundrymanJobsMonitor/2.0)',
+    'Mozilla/5.0 (compatible; FoundrymanJobsMonitor/3.0)',
     '-H',
     'Accept: text/html,application/xhtml+xml,text/plain,*/*;q=0.8',
     '-w',
@@ -250,81 +379,142 @@ async function fetchWithCurl(url) {
     url,
   ]
 
-  const result = await execFileAsync(
-    'curl',
-    args,
-    {
-      maxBuffer: 10 * 1024 * 1024,
+  try {
+    console.log(
+      `[CURL] ${url}`
+    )
+
+    const result =
+      await execFileAsync(
+        'curl',
+        args,
+        {
+          maxBuffer:
+            10 * 1024 * 1024,
+        }
+      )
+
+    const output =
+      result.stdout || ''
+
+    const statusMatch =
+      output.match(
+        /__STATUS__:(\d+)/
+      )
+
+    const finalUrlMatch =
+      output.match(
+        /__FINAL_URL__:(.*)/
+      )
+
+    const contentTypeMatch =
+      output.match(
+        /__CONTENT_TYPE__:(.*)/
+      )
+
+    const body =
+      output.replace(
+        /\n__STATUS__:\d+\n[\s\S]*$/,
+        ''
+      )
+
+    const status =
+      Number(
+        statusMatch?.[1] || 0
+      )
+
+    const finalUrl =
+      esc(
+        finalUrlMatch?.[1] || url
+      )
+
+    const contentType =
+      esc(
+        contentTypeMatch?.[1] || ''
+      )
+
+    console.log(
+      `[CURL-RESULT] ${url} -> HTTP ${status}, final=${finalUrl}, type=${contentType}`
+    )
+
+    return {
+      status,
+      finalUrl,
+      contentType,
+      body,
+      method: 'curl',
     }
-  )
+  } catch (error) {
+    console.log(
+      `[CURL-ERROR] ${url} -> ${formatError(error)}`
+    )
 
-  const output = result.stdout || ''
-
-  const statusMatch =
-    output.match(/__STATUS__:(\d+)/)
-
-  const finalUrlMatch =
-    output.match(/__FINAL_URL__:(.*)/)
-
-  const contentTypeMatch =
-    output.match(/__CONTENT_TYPE__:(.*)/)
-
-  const body = output
-    .replace(/\n__STATUS__:\d+\n[\s\S]*$/, '')
-
-  return {
-    status: Number(statusMatch?.[1] || 0),
-    finalUrl: esc(finalUrlMatch?.[1] || url),
-    contentType: esc(contentTypeMatch?.[1] || ''),
-    body,
-    method: 'curl',
+    throw error
   }
 }
 
 async function fetchPage(url) {
+  let nodeError = null
+
   try {
     return await fetchWithNode(url)
-  } catch (nodeError) {
-    console.log(
-      `[FALLBACK] Node fetch failed for ${url}: ${nodeError.message}`
-    )
+  } catch (error) {
+    nodeError = error
 
-    try {
-      return await fetchWithCurl(url)
-    } catch (curlError) {
-      throw new Error(
-        `Node fetch: ${nodeError.message}; curl: ${curlError.message}`
-      )
-    }
+    console.log(
+      `[FALLBACK] Node failed for ${url}`
+    )
+  }
+
+  try {
+    return await fetchWithCurl(url)
+  } catch (curlError) {
+    throw new Error(
+      `FETCH FAILED | URL=${url} | NODE=${formatError(nodeError)} | CURL=${formatError(curlError)}`
+    )
   }
 }
 
-async function fingerprint(url, title) {
-  const data = new TextEncoder().encode(
-    `${url}|${title}`
-  )
+async function fingerprint(
+  url,
+  title
+) {
+  const data =
+    new TextEncoder().encode(
+      `${url}|${title}`
+    )
 
-  const hash = await crypto.subtle.digest(
-    'SHA-256',
-    data
-  )
+  const hash =
+    await crypto.subtle.digest(
+      'SHA-256',
+      data
+    )
 
-  return Array.from(new Uint8Array(hash))
+  return Array.from(
+    new Uint8Array(hash)
+  )
     .map((value) =>
-      value.toString(16).padStart(2, '0')
+      value
+        .toString(16)
+        .padStart(2, '0')
     )
     .join('')
 }
 
 function candidateTitle(item) {
-  if (item.title) return item.title
+  if (item.title) {
+    return item.title
+  }
 
   if (isPdf(item.url)) {
     try {
       return (
         decodeURIComponent(
-          item.url.split('/').pop() || ''
-        ) || 'PDF Notification'
+          item.url
+            .split('/')
+            .pop() || ''
+        ) ||
+        'PDF Notification'
       )
     } catch {
       return 'PDF Notification'
@@ -340,49 +530,74 @@ async function insertCandidate({
   item,
   matchedKeywords,
   discoveryMatches,
-  pageUrl,
   sourceStatus,
   snippet,
 }) {
-  const title = candidateTitle(item)
-  const fp = await fingerprint(item.url, title)
+  const title =
+    candidateTitle(item)
+
+  const fp =
+    await fingerprint(
+      item.url,
+      title
+    )
 
   const payload = {
     source_id: source.id,
     monitoring_run_id: run.id,
     title,
     url: item.url,
-    matched_keywords: matchedKeywords.join(', '),
+    matched_keywords:
+      matchedKeywords.join(', '),
     snippet:
       snippet ||
       `Potential vacancy discovered from ${source.source_name}. Official eligibility and equivalence require manual verification.`,
-    source_status: `HTTP ${sourceStatus}`,
-    eligibility_status: 'Needs Verification',
-    review_status: 'Pending Review',
+    source_status:
+      `HTTP ${sourceStatus}`,
+    eligibility_status:
+      'Needs Verification',
+    review_status:
+      'Pending Review',
     fingerprint: fp,
   }
 
-  if (discoveryMatches.length > 0) {
+  if (
+    discoveryMatches.length > 0
+  ) {
     payload.snippet +=
       ` Discovery terms: ${discoveryMatches.join(', ')}.`
   }
 
   try {
-    await api('vacancy_candidates', {
-      method: 'POST',
-      headers: {
-        Prefer: 'return=minimal',
-      },
-      body: JSON.stringify(payload),
-    })
+    await api(
+      'vacancy_candidates',
+      {
+        method: 'POST',
+        headers: {
+          Prefer:
+            'return=minimal',
+        },
+        body:
+          JSON.stringify(
+            payload
+          ),
+      }
+    )
 
     return true
   } catch (error) {
-    const message = String(error.message || '').toLowerCase()
+    const message =
+      String(
+        error.message || ''
+      ).toLowerCase()
 
     if (
-      message.includes('duplicate') ||
-      message.includes('unique constraint')
+      message.includes(
+        'duplicate'
+      ) ||
+      message.includes(
+        'unique constraint'
+      )
     ) {
       return false
     }
@@ -392,21 +607,29 @@ async function insertCandidate({
 }
 
 async function main() {
-  const sources = await api(
-    'source_registry?active=eq.true&select=*&order=priority.asc'
-  )
+  const sources =
+    await api(
+      'source_registry?active=eq.true&select=*&order=priority.asc'
+    )
 
-  const runResponse = await api('monitoring_runs', {
-    method: 'POST',
-    headers: {
-      Prefer: 'return=representation',
-    },
-    body: JSON.stringify({
-      status: 'Running',
-    }),
-  })
+  const runResponse =
+    await api(
+      'monitoring_runs',
+      {
+        method: 'POST',
+        headers: {
+          Prefer:
+            'return=representation',
+        },
+        body:
+          JSON.stringify({
+            status: 'Running',
+          }),
+      }
+    )
 
-  const run = runResponse[0]
+  const run =
+    runResponse[0]
 
   let checked = 0
   let pages = 0
@@ -417,54 +640,101 @@ async function main() {
     checked++
 
     const rootUrl =
-      source.recruitment_url || source.official_url
+      source.recruitment_url ||
+      source.official_url
 
     let sourcePages = 0
     let sourceCandidates = 0
 
-    try {
-      const exactTerms = terms(source.search_keywords)
+    console.log('')
+    console.log(
+      `========== ${source.source_name} ==========`
+    )
+    console.log(
+      `[SOURCE-URL] ${rootUrl}`
+    )
 
-      const discoveryTerms = Array.from(
-        new Set([
-          ...exactTerms,
-          ...DISCOVERY_TERMS,
-        ])
-      )
+    try {
+      const exactTerms =
+        terms(
+          source.search_keywords
+        )
+
+      const discoveryTerms =
+        Array.from(
+          new Set([
+            ...exactTerms,
+            ...DISCOVERY_TERMS,
+          ])
+        )
 
       const queue = [
         {
           url: rootUrl,
-          title: source.source_name || 'Official Source',
+          title:
+            source.source_name ||
+            'Official Source',
           depth: 0,
         },
       ]
 
-      const visited = new Set()
-      const candidateUrls = new Set()
+      const visited =
+        new Set()
+
+      const candidateUrls =
+        new Set()
 
       while (
         queue.length > 0 &&
-        sourcePages < MAX_PAGES_PER_SOURCE
+        sourcePages <
+          MAX_PAGES_PER_SOURCE
       ) {
-        const current = queue.shift()
+        const current =
+          queue.shift()
 
         const normalized =
-          normalizeUrl(current.url, rootUrl)
+          normalizeUrl(
+            current.url,
+            rootUrl
+          )
 
-        if (!normalized) continue
-        if (visited.has(normalized)) continue
-        if (!isSameHost(normalized, rootUrl)) continue
+        if (!normalized) {
+          continue
+        }
+
+        if (
+          visited.has(
+            normalized
+          )
+        ) {
+          continue
+        }
+
+        if (
+          !isSameHost(
+            normalized,
+            rootUrl
+          )
+        ) {
+          continue
+        }
 
         visited.add(normalized)
 
         let response
 
         try {
-          response = await fetchPage(normalized)
+          response =
+            await fetchPage(
+              normalized
+            )
         } catch (error) {
           console.log(
-            `[ERROR] ${source.source_name}: ${normalized} -> ${error.message}`
+            `[SOURCE-FETCH-FAILED] ${source.source_name} | ${normalized}`
+          )
+
+          console.log(
+            `[SOURCE-FETCH-DETAIL] ${formatError(error)}`
           )
 
           throw error
@@ -474,27 +744,33 @@ async function main() {
         pages++
 
         const contentType =
-          response.contentType.toLowerCase()
+          response.contentType
+            .toLowerCase()
 
-        /*
-         * PDF URLs are discovered from links.
-         * We do not parse arbitrary PDF bytes here.
-         */
         if (
           isPdf(normalized) ||
-          contentType.includes('application/pdf')
+          contentType.includes(
+            'application/pdf'
+          )
         ) {
           const haystack =
-            `${current.title} ${normalized}`.toLowerCase()
+            `${current.title} ${normalized}`
+              .toLowerCase()
 
           const exactMatches =
-            exactTerms.filter((term) =>
-              haystack.includes(term)
+            exactTerms.filter(
+              (term) =>
+                haystack.includes(
+                  term
+                )
             )
 
           const discoveryMatches =
-            DISCOVERY_TERMS.filter((term) =>
-              haystack.includes(term)
+            DISCOVERY_TERMS.filter(
+              (term) =>
+                haystack.includes(
+                  term
+                )
             )
 
           if (
@@ -506,31 +782,41 @@ async function main() {
             )
           ) {
             if (
-              !candidateUrls.has(normalized) &&
+              !candidateUrls.has(
+                normalized
+              ) &&
               sourceCandidates <
                 MAX_CANDIDATES_PER_SOURCE
             ) {
-              candidateUrls.add(normalized)
+              candidateUrls.add(
+                normalized
+              )
 
               const inserted =
-                await insertCandidate({
-                  source,
-                  run,
-                  item: {
-                    url: normalized,
-                    title: candidateTitle({
+                await insertCandidate(
+                  {
+                    source,
+                    run,
+                    item: {
                       url: normalized,
-                      title: current.title,
-                    }),
-                  },
-                  matchedKeywords: exactMatches,
-                  discoveryMatches,
-                  pageUrl: normalized,
-                  sourceStatus: response.status,
-                  snippet:
-                    `Potential official PDF discovered from ${source.source_name}. ` +
-                    `Manual verification is required before publication.`,
-                })
+                      title:
+                        candidateTitle(
+                          {
+                            url: normalized,
+                            title:
+                              current.title,
+                          }
+                        ),
+                    },
+                    matchedKeywords:
+                      exactMatches,
+                    discoveryMatches,
+                    sourceStatus:
+                      response.status,
+                    snippet:
+                      `Potential official PDF discovered from ${source.source_name}. Manual verification is required before publication.`,
+                  }
+                )
 
               if (inserted) {
                 candidates++
@@ -543,7 +829,9 @@ async function main() {
         }
 
         const pageText =
-          extractPageText(response.body)
+          extractPageText(
+            response.body
+          )
 
         const exactMatches =
           findKeywordMatches(
@@ -563,7 +851,9 @@ async function main() {
             response.finalUrl
           )
 
-        for (const link of pageLinks) {
+        for (
+          const link of pageLinks
+        ) {
           if (
             candidateUrls.size >=
             MAX_CANDIDATES_PER_SOURCE
@@ -571,21 +861,33 @@ async function main() {
             break
           }
 
-          if (!isSameHost(link.url, rootUrl)) {
+          if (
+            !isSameHost(
+              link.url,
+              rootUrl
+            )
+          ) {
             continue
           }
 
           const haystack =
-            `${link.title} ${link.url}`.toLowerCase()
+            `${link.title} ${link.url}`
+              .toLowerCase()
 
           const linkExactMatches =
-            exactTerms.filter((term) =>
-              haystack.includes(term)
+            exactTerms.filter(
+              (term) =>
+                haystack.includes(
+                  term
+                )
             )
 
           const linkDiscoveryMatches =
-            DISCOVERY_TERMS.filter((term) =>
-              haystack.includes(term)
+            DISCOVERY_TERMS.filter(
+              (term) =>
+                haystack.includes(
+                  term
+                )
             )
 
           const relevantPageLink =
@@ -599,41 +901,51 @@ async function main() {
             linkDiscoveryMatches.length > 0 ||
             relevantPageLink
 
-          if (!interesting) continue
+          if (!interesting) {
+            continue
+          }
 
-          /*
-           * PDF candidate
-           */
-          if (isPdf(link.url)) {
-            if (candidateUrls.has(link.url)) {
+          if (
+            isPdf(link.url)
+          ) {
+            if (
+              candidateUrls.has(
+                link.url
+              )
+            ) {
               continue
             }
 
-            candidateUrls.add(link.url)
+            candidateUrls.add(
+              link.url
+            )
 
             const inserted =
-              await insertCandidate({
-                source,
-                run,
-                item: link,
-                matchedKeywords: [
-                  ...new Set([
-                    ...exactMatches,
-                    ...linkExactMatches,
-                  ]),
-                ],
-                discoveryMatches: [
-                  ...new Set([
-                    ...discoveryMatches,
-                    ...linkDiscoveryMatches,
-                  ]),
-                ],
-                pageUrl: normalized,
-                sourceStatus: response.status,
-                snippet:
-                  `Potential official PDF linked from ${source.source_name}. ` +
-                  `Manual verification is required before publication.`,
-              })
+              await insertCandidate(
+                {
+                  source,
+                  run,
+                  item: link,
+                  matchedKeywords:
+                    [
+                      ...new Set([
+                        ...exactMatches,
+                        ...linkExactMatches,
+                      ]),
+                    ],
+                  discoveryMatches:
+                    [
+                      ...new Set([
+                        ...discoveryMatches,
+                        ...linkDiscoveryMatches,
+                      ]),
+                    ],
+                  sourceStatus:
+                    response.status,
+                  snippet:
+                    `Potential official PDF linked from ${source.source_name}. Manual verification is required before publication.`,
+                }
+              )
 
             if (inserted) {
               candidates++
@@ -643,9 +955,6 @@ async function main() {
             continue
           }
 
-          /*
-           * Queue relevant HTML pages for deeper scanning.
-           */
           if (
             current.depth < 2 &&
             queue.length <
@@ -654,45 +963,52 @@ async function main() {
             queue.push({
               url: link.url,
               title: link.title,
-              depth: current.depth + 1,
+              depth:
+                current.depth + 1,
             })
           }
 
-          /*
-           * Exact keyword in link.
-           */
           if (
-            linkExactMatches.length > 0 &&
-            !candidateUrls.has(link.url)
+            linkExactMatches.length >
+              0 &&
+            !candidateUrls.has(
+              link.url
+            )
           ) {
-            candidateUrls.add(link.url)
+            candidateUrls.add(
+              link.url
+            )
 
             const inserted =
-              await insertCandidate({
-                source,
-                run,
-                item: link,
-                matchedKeywords: [
-                  ...new Set([
-                    ...exactMatches,
-                    ...linkExactMatches,
-                  ]),
-                ],
-                discoveryMatches: [
-                  ...new Set([
-                    ...discoveryMatches,
-                    ...linkDiscoveryMatches,
-                  ]),
-                ],
-                pageUrl: normalized,
-                sourceStatus: response.status,
-                snippet:
-                  getContext(
-                    pageText,
-                    linkExactMatches[0]
-                  ) ||
-                  `Exact configured keyword found in official link: ${link.title}`,
-              })
+              await insertCandidate(
+                {
+                  source,
+                  run,
+                  item: link,
+                  matchedKeywords:
+                    [
+                      ...new Set([
+                        ...exactMatches,
+                        ...linkExactMatches,
+                      ]),
+                    ],
+                  discoveryMatches:
+                    [
+                      ...new Set([
+                        ...discoveryMatches,
+                        ...linkDiscoveryMatches,
+                      ]),
+                    ],
+                  sourceStatus:
+                    response.status,
+                  snippet:
+                    getContext(
+                      pageText,
+                      linkExactMatches[0]
+                    ) ||
+                    `Exact configured keyword found in official link: ${link.title}`,
+                }
+              )
 
             if (inserted) {
               candidates++
@@ -701,38 +1017,43 @@ async function main() {
           }
         }
 
-        /*
-         * Exact keyword on current page.
-         */
         if (
           exactMatches.length > 0 &&
-          !candidateUrls.has(response.finalUrl) &&
+          !candidateUrls.has(
+            response.finalUrl
+          ) &&
           sourceCandidates <
             MAX_CANDIDATES_PER_SOURCE
         ) {
-          candidateUrls.add(response.finalUrl)
+          candidateUrls.add(
+            response.finalUrl
+          )
 
           const inserted =
-            await insertCandidate({
-              source,
-              run,
-              item: {
-                url: response.finalUrl,
-                title:
-                  current.title ||
-                  source.source_name ||
-                  'Potential Vacancy Page',
-              },
-              matchedKeywords: exactMatches,
-              discoveryMatches,
-              pageUrl: normalized,
-              sourceStatus: response.status,
-              snippet:
-                getContext(
-                  pageText,
-                  exactMatches[0]
-                ),
-            })
+            await insertCandidate(
+              {
+                source,
+                run,
+                item: {
+                  url:
+                    response.finalUrl,
+                  title:
+                    current.title ||
+                    source.source_name ||
+                    'Potential Vacancy Page',
+                },
+                matchedKeywords:
+                  exactMatches,
+                discoveryMatches,
+                sourceStatus:
+                  response.status,
+                snippet:
+                  getContext(
+                    pageText,
+                    exactMatches[0]
+                  ),
+              }
+            )
 
           if (inserted) {
             candidates++
@@ -746,49 +1067,58 @@ async function main() {
         {
           method: 'PATCH',
           headers: {
-            Prefer: 'return=minimal',
+            Prefer:
+              'return=minimal',
           },
-          body: JSON.stringify({
-            last_checked:
-              new Date().toISOString(),
-            last_status:
-              `HTTP scan completed`,
-            last_error: null,
-            updated_at:
-              new Date().toISOString(),
-          }),
+          body:
+            JSON.stringify({
+              last_checked:
+                new Date().toISOString(),
+              last_status:
+                'HTTP scan completed',
+              last_error: null,
+              updated_at:
+                new Date().toISOString(),
+            }),
         }
       )
 
       console.log(
-        `[OK] ${source.source_name}: ` +
-          `pages=${sourcePages}, ` +
-          `candidates=${sourceCandidates}`
+        `[OK] ${source.source_name}: pages=${sourcePages}, candidates=${sourceCandidates}`
       )
     } catch (error) {
       errors++
+
+      const detailedError =
+        String(
+          error.message ||
+            formatError(error)
+        ).slice(0, 500)
 
       await api(
         `source_registry?id=eq.${source.id}`,
         {
           method: 'PATCH',
           headers: {
-            Prefer: 'return=minimal',
+            Prefer:
+              'return=minimal',
           },
-          body: JSON.stringify({
-            last_checked:
-              new Date().toISOString(),
-            last_status: 'ERROR',
-            last_error:
-              String(error.message).slice(0, 500),
-            updated_at:
-              new Date().toISOString(),
-          }),
+          body:
+            JSON.stringify({
+              last_checked:
+                new Date().toISOString(),
+              last_status:
+                'ERROR',
+              last_error:
+                detailedError,
+              updated_at:
+                new Date().toISOString(),
+            }),
         }
       )
 
       console.error(
-        `[ERROR] ${source.source_name}: ${error.message}`
+        `[ERROR] ${source.source_name}: ${detailedError}`
       )
     }
   }
@@ -798,23 +1128,34 @@ async function main() {
     {
       method: 'PATCH',
       headers: {
-        Prefer: 'return=minimal',
+        Prefer:
+          'return=minimal',
       },
-      body: JSON.stringify({
-        finished_at:
-          new Date().toISOString(),
-        sources_checked: checked,
-        pages_scanned: pages,
-        candidates_found: candidates,
-        errors_count: errors,
-        status:
-          errors === checked
-            ? 'Failed'
-            : 'Completed',
-        notes:
-          'V6 free-tier source monitor with retry and curl fallback. Candidates require manual official verification before publication.',
-      }),
+      body:
+        JSON.stringify({
+          finished_at:
+            new Date().toISOString(),
+          sources_checked:
+            checked,
+          pages_scanned:
+            pages,
+          candidates_found:
+            candidates,
+          errors_count:
+            errors,
+          status:
+            errors === checked
+              ? 'Failed'
+              : 'Completed',
+          notes:
+            'V7 diagnostic source monitor. Detailed Node/curl fetch errors are preserved for failed sources. Candidates require manual official verification before publication.',
+        }),
     }
+  )
+
+  console.log('')
+  console.log(
+    '========== MONITORING SUMMARY =========='
   )
 
   console.log(
@@ -828,6 +1169,9 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(error)
+  console.error(
+    `[FATAL] ${formatError(error)}`
+  )
+
   process.exit(1)
 })
