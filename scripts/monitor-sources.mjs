@@ -28,7 +28,7 @@ const CONFIG = {
   USER_AGENT:
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
     "(KHTML, like Gecko) Chrome/131.0 Safari/537.36 " +
-    "FoundrymanJobsMonitor/10.6",
+    "FoundrymanJobsMonitor/10.7",
 
   DISCOVERY_TERMS: [
     "foundryman",
@@ -803,7 +803,10 @@ function shouldCrawlLink(link) {
     "recruitment", "recruit", "vacancy", "vacancies",
     "career", "careers", "job", "jobs", "advertisement",
     "advt", "notification", "engagement", "apprentice",
-    "apprenticeship", "application", "employment"
+    "apprenticeship", "application", "employment",
+    "foundryman", "foundry man", "foundry-man",
+    "moulder", "molder", "foundry worker",
+    "foundry trade", "foundry operator", "foundry technician"
   ];
 
   const documentLike =
@@ -1223,11 +1226,25 @@ async function processSource(source, state) {
         result.links.length > 0 &&
         localPages < CONFIG.MAX_PAGES_PER_SOURCE
       ) {
-        for (const link of result.links) {
-          if (!shouldCrawlLink(link)) {
-            continue;
-          }
+        const prioritizedLinks = result.links
+          .filter((link) => shouldCrawlLink(link))
+          .sort((a, b) => {
+            const rank = (link) => {
+              const value = `${link.text || ""} ${link.url || ""}`.toLowerCase();
+              let score = 0;
 
+              if (/foundryman|foundry[ -]?man|moulder|molder/.test(value)) score += 100;
+              if (/foundry|apprentice|vacancy|recruitment|advertisement|notification/.test(value)) score += 60;
+              if (/\\.(pdf|doc|docx)(?:$|[?#])/.test(String(link.url || ""))) score += 40;
+              if (/uploads|documents|download/.test(String(link.url || "").toLowerCase())) score += 20;
+
+              return score;
+            };
+
+            return rank(b) - rank(a);
+          });
+
+        for (const link of prioritizedLinks) {
           addQueue(
             link.url,
             link.text,
@@ -1346,7 +1363,7 @@ async function runWithConcurrency(
 
 async function main() {
   console.log("==============================================");
-  console.log("FOUNDRYMAN VACANCY MONITOR V10.6");
+  console.log("FOUNDRYMAN VACANCY MONITOR V10.7");
   console.log("Fast profile: bounded crawl + timeout-aware fallback");
   console.log("==============================================");
   console.log(
@@ -1403,7 +1420,7 @@ async function main() {
         pages_scanned: 0,
         candidates_found: 0,
         errors_count: 0,
-        notes: "V10.6 source-failure and child-link warning separation",
+        notes: "V10.7 foundry-link prioritization monitor",
       },
       "create monitoring run"
     );
