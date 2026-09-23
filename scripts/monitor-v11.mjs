@@ -43,20 +43,19 @@ const http = u => /^https?:\/\//i.test(u);
 const host = u => { try{return new URL(u).hostname.toLowerCase().replace(/^www\./,"")}catch{return ""} };
 const pdf = u => /\.pdf(?:$|[?#])/i.test(u);
 const normalize = (u,b) => { try{return new URL(u,b).href.split("#")[0]}catch{return null} };
+const canonicalUrl = u => { try { const x=new URL(u); x.hash=""; for(const k of [...x.searchParams.keys()]) if(/^(utm_|fbclid$|gclid$|mc_cid$|mc_eid$)/i.test(k)) x.searchParams.delete(k); return x.href.replace(/\/$/,"").toLowerCase(); } catch { return String(u||"").toLowerCase().replace(/\/$/,""); } };
+const normalizedTitle = v => clean(v).toLowerCase().replace(/\b(advt?|advertisement|notification|notice|recruitment|vacancy|vacancies)\b/g," ").replace(/[^a-z0-9]+/g," ").replace(/\s+/g," ").trim();
 
 function termsIn(text, terms=CFG.foundry) {
   const l=clean(text).toLowerCase();
   return terms.filter(t=>l.includes(t));
 }
 function score(title,url,text) {
-  const a=(clean(title)+" "+url+" "+clean(text)).toLowerCase();
-  let s=0;
-  for(const t of CFG.strong) if(a.includes(t)) s+=35;
-  if(a.includes("foundry")) s+=20;
-  if(CFG.recruitment.some(t=>a.includes(t))) s+=15;
-  if(/\b(iti|ncvt|scvt|ntc|nac|apprentice)\b/i.test(a)) s+=15;
-  if(pdf(url)) s+=5;
-  return Math.min(100,s);
+  const a=(clean(title)+" "+url+" "+clean(text)).toLowerCase(), head=(clean(title)+" "+url).toLowerCase();
+  const strongHit=CFG.strong.some(t=>head.includes(t)), recruitHit=CFG.recruitment.some(t=>a.includes(t)), tradeHit=/\b(iti|ncvt|scvt|ntc|nac|apprentice|trade certificate)\b/i.test(a);
+  let s=strongHit?55:(a.includes("foundry")?25:0);
+  if(recruitHit)s+=15; if(tradeHit)s+=15; if(pdf(url))s+=5; if(isClosed(text))s-=10;
+  return Math.max(0,Math.min(100,s));
 }
 function context(text) {
   const s=clean(text), l=s.toLowerCase();
@@ -76,7 +75,21 @@ function qualification(text){
   let idx=-1;for(const t of ts){const i=l.indexOf(t);if(i>=0&&(idx<0||i<idx))idx=i;}
   return idx<0?"":trunc(s.slice(Math.max(0,idx-250),idx+1000),1300);
 }
-function fingerprint(sourceId,url,title){return crypto.createHash("sha256").update(`${sourceId||"agg"}|${url.toLowerCase()}|${clean(title).toLowerCase()}`).digest("hex");}
+function fingerprint(url,title,organization=""){
+  return crypto.createHash("sha256").update(canonicalUrl(url)+"|"+normalizedTitle(title)+"|"+clean(organization).toLowerCase()).digest("hex");
+}
+function explicitClosed(text){ const s=clean(text).toLowerCase(); return /registration\s+closed|application\s+is\s+over|last\s+date\s+.*expired|deadline\s+.*expired|applications?\s+closed/.test(s); }
+function parseDeadlineDate(text){
+  const s=clean(text);
+  const m=s.match(/(?:last\s+date|closing\s+date|deadline|apply[^.]{0,30}(?:before|by))[^\d]{0,80}(\d{1,2}[\/-]\d{1,2}[\/-]\d{4}|\d{4}[\/-]\d{1,2}[\/-]\d{1,2}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})/i);
+  if(!m)return null;
+  const raw=m[1].replace(/\//g,"-"); let d;
+  if(/^\d{4}-\d{1,2}-\d{1,2}$/.test(raw)) d=new Date(raw+"T23:59:59Z");
+  else if(/^\d{1,2}-\d{1,2}-\d{4}$/.test(raw)){const [dd,mm,yy]=raw.split("-");d=new Date(yy+"-"+mm.padStart(2,"0")+"-"+dd.padStart(2,"0")+"T23:59:59Z");}
+  else d=new Date(raw+" 23:59:59 UTC");
+  return Number.isNaN(d.getTime())?null:d;
+}
+function isClosed(text){ if(explicitClosed(text))return true; const d=parseDeadlineDate(text); return !!(d&&d.getTime()<Date.now()); }
 
 async function api(path,opts={},label=path){
   for(let i=1;i<=3;i++){
@@ -150,96 +163,25 @@ function crawlable(l){
   return /foundry|moulder|molder|recruit|vacanc|career|job|apprentice|notification|advertisement|iti|\.pdf|uploads|documents|download/.test(v);
 }
 
-async function candidate({sourceId,runId,sourceName,url,title,text,documentType,status,discoveryMethod,verificationUrl}){
-  const matched=termsIn(`${title} ${url} ${text}`);
-  const sc=score(title,url,text);
-  const recruit=CFG.recruitment.some(t=>clean(text).toLowerCase().includes(t)||clean(title).toLowerCase().includes(t));
-  if(matched.length===0 || (sc<55&&!recruit))return false;
-  const fp=fingerprint(sourceId,url,title);
+async function candidate({sourceId,runId,sourceName,organization="",url,title,text,documentType,status,discoveryMethod,verificationUrl}){
+  const matched=termsIn(title+" "+url+" "+text), head=(clean(title)+" "+url).toLowerCase(), body=clean(text).toLowerCase();
+  const strongHit=CFG.strong.some(t=>head.includes(t)), recruit=CFG.recruitment.some(t=>body.includes(t)||clean(title).toLowerCase().includes(t));
+  const trade=/\b(iti|ncvt|scvt|ntc|nac|apprentice|trade certificate)\b/i.test(body), sc=score(title,url,text);
+  if(matched.length===0 || (!strongHit && !(recruit&&trade) && sc<60))return false;
+  if(CFG.exclude.some(x=>head.includes(x))&&!strongHit)return false;
+  const canonical=canonicalUrl(url), fp=fingerprint(canonical,title,organization);
+  const existing=await get("vacancy_candidates?select=id&fingerprint=eq."+encodeURIComponent(fp)+"&limit=1","candidate dedupe").catch(()=>[]);
+  if(Array.isArray(existing)&&existing.length)return false;
+  const closed=isClosed(text), contentHash=crypto.createHash("sha256").update(clean(text)).digest("hex");
   const row={
     source_id:sourceId||null,monitoring_run_id:runId,discovered_at:new Date().toISOString(),
-    title:trunc(title,500)||sourceName||"Foundryman-related opportunity",url,
+    title:trunc(title,500)||sourceName||"Foundryman-related opportunity",url:canonical,
     matched_keywords:matched.join(", "),snippet:context(text)||trunc(text,1000),
-    source_status:status,eligibility_status:"Needs Verification",review_status:"Pending Review",fingerprint:fp,
-    document_type:documentType,matched_context:context(text),confidence_score:sc,
-    deadline_text:deadline(text),qualification_text:qualification(text),document_title:trunc(title,500),
-    content_hash:crypto.createHash("sha256").update(clean(text)).digest("hex"),
-    discovery_method:discoveryMethod,verification_url:verificationUrl||url
+    source_status:status,eligibility_status:closed?"Closed/Expired":"Needs Verification",review_status:"Pending Review",fingerprint:fp,
+    document_type:documentType,matched_context:context(text),confidence_score:sc,deadline_text:deadline(text),
+    qualification_text:qualification(text),document_title:trunc(title,500),content_hash:contentHash,
+    discovery_method:discoveryMethod,verification_url:verificationUrl||canonical
   };
-  try{await post("vacancy_candidates",row,`candidate ${sourceName}`);return true;}
+  try{await post("vacancy_candidates",row,"candidate "+sourceName);return true;}
   catch(e){if(String(e).includes("23505")||String(e).toLowerCase().includes("duplicate"))return false;console.log("[CANDIDATE-ERROR]",sourceName,e.message);return false;}
 }
-
-function strategy(source){
-  const n=(source.source_name||"").toLowerCase(), t=(source.source_type||"").toLowerCase();
-  if(/railway|rrb|rrc/.test(n))return {pages:22,depth:4};
-  if(/psc|commission|selection board|employment/.test(n)||t.includes("employment"))return {pages:18,depth:4};
-  if(/bhel|hal|drdo|csir|spmcil|isro|defence|atomic|shipyard|psu/.test(n))return {pages:18,depth:4};
-  if(/apprenticeship|skill|dgt|iti/.test(n))return {pages:20,depth:4};
-  return {pages:14,depth:3};
-}
-
-async function processSource(source,run,state){
-  const urls=[source.recruitment_url,source.official_url].filter((u,i,a)=>http(u)&&a.indexOf(u)===i);
-  if(!urls.length){state.errors++;return;}
-  const st=strategy(source), q=[],seen=new Set(),queued=new Set(),hosts=new Set(urls.map(host)); 
-  const push=(url,title="",depth=0,isRoot=false)=>{if(!url||!http(url)||queued.has(url)||seen.has(url))return;const h=host(url);if(![...hosts].some(x=>h===x||h.endsWith("."+x)||x.endsWith("."+h)))return;queued.add(url);q.push({url,title,depth,isRoot});};
-  urls.forEach(u=>push(u,"Recruitment",0,true));
-  let pages=0,errors=0,warnings=0;
-  while(q.length&&pages<st.pages){
-    q.sort((a,b)=>(b.isRoot-a.isRoot)||(b.depth-a.depth?0:linkRank({text:b.title,url:b.url})-linkRank({text:a.title,url:a.url})));
-    const r=q.shift();if(seen.has(r.url))continue;seen.add(r.url);
-    try{
-      const got=await fetchUrl(r.url,r.isRoot?CFG.sourceTimeout:CFG.pageTimeout,`${source.source_name} ${r.url}`);
-      pages++;state.pages++;
-      const type=pdf(r.url)||/pdf/i.test(got.type)?"PDF":"HTML";
-      let title="",text="",links=[];
-      if(type==="PDF"){text=await extractPdf(got.buffer,got.url);title=decodeURIComponent(got.url.split("/").pop()||"PDF");}
-      else {const p=parseHtml(got.buffer.toString("utf8"),got.url);title=p.title||r.title;text=p.text;links=p.links;}
-      if(text)await candidate({sourceId:source.id,runId:run.id,sourceName:source.source_name,url:got.url,title,text,documentType:type,status:"Official Source",discoveryMethod:type==="PDF"?"official-targeted-pdf":"official-targeted-page",verificationUrl:got.url}).then(x=>{if(x)state.candidates++;});
-      if(type==="HTML"&&r.depth<st.depth){
-        for(const l of links.filter(crawlable).sort((a,b)=>linkRank(b)-linkRank(a)).slice(0,CFG.maxLinksPerPage))push(l.url,l.text,r.depth+1,false);
-      }
-    }catch(e){if(r.isRoot){errors++;state.errors++;}else{warnings++;state.warnings++;}}
-  }
-  try{await patch(`source_registry?id=eq.${encodeURIComponent(source.id)}`,{last_checked:new Date().toISOString(),last_status:errors?"Error":warnings?"OK with warnings":"OK",last_error:errors?`root access failure(s): ${errors}`:null},`source health ${source.source_name}`)}catch{}
-  console.log(`[SOURCE] ${source.source_name} pages=${pages} candidates=${state.candidates} errors=${errors} warnings=${warnings}`);
-}
-
-async function processAggregator(agg,run,state){
-  try{
-    const got=await fetchUrl(agg.url,CFG.sourceTimeout,agg.name);
-    const p=parseHtml(got.buffer.toString("utf8"),got.url);
-    const links=p.links.filter(crawlable).sort((a,b)=>linkRank(b)-linkRank(a)).slice(0,40);
-    for(const l of links){
-      try{
-        const g=await fetchUrl(l.url,CFG.pageTimeout,agg.name);
-        const type=pdf(l.url)||/pdf/i.test(g.type)?"PDF":"HTML";
-        let title=l.text||"",text="",outLinks=[];
-        if(type==="PDF"){text=await extractPdf(g.buffer,g.url);title=title||decodeURIComponent(g.url.split("/").pop()||"PDF");}
-        else{const x=parseHtml(g.buffer.toString("utf8"),g.url);title=x.title||title;text=x.text;outLinks=x.links;}
-        if(termsIn(`${title} ${g.url} ${text}`).length){
-          const official=outLinks.find(x=>/\.gov\.in$|\.nic\.in$|\.ac\.in$|\.edu\.in$|\.org\.in$/i.test(host(x.url)));
-          await candidate({sourceId:null,runId:run.id,sourceName:agg.name,url:g.url,title,text,documentType:type,status:"Aggregator Discovery — Official verification required",discoveryMethod:"aggregator-discovery",verificationUrl:official?.url||""}).then(x=>{if(x)state.candidates++;});
-        }
-      }catch{}
-    }
-  }catch(e){state.warnings++;console.log("[AGGREGATOR]",agg.name,e.message);}
-}
-
-async function main(){
-  console.log("FOUNDRYMAN VACANCY MONITOR V11.0 — TARGETED DISCOVERY");
-  let sources=await get("source_registry?active=eq.true&select=*&order=priority.asc","load sources");
-  if(!Array.isArray(sources))throw new Error("source registry not array");
-  if(SOURCE_NAMES.length)sources=sources.filter(s=>SOURCE_NAMES.some(n=>(s.source_name||"").toLowerCase().includes(n)));
-  if(SOURCE_LIMIT>0)sources=sources.slice(0,SOURCE_LIMIT);
-  if(MODE==="official-test")sources=sources.slice(0,Math.min(sources.length,SOURCE_LIMIT||8));
-  const run0=await post("monitoring_runs",{started_at:new Date().toISOString(),status:"Running",sources_checked:0,pages_scanned:0,candidates_found:0,errors_count:0,notes:`V11.0 targeted discovery mode=${MODE}`},"create run");
-  const run=Array.isArray(run0)?run0[0]:run0;const state={pages:0,candidates:0,errors:0,warnings:0};
-  let idx=0;async function worker(){while(true){const i=idx++;if(i>=sources.length)return;await processSource(sources[i],run,state);}}
-  await Promise.all(Array.from({length:Math.min(CFG.concurrency,sources.length)},worker));
-  if(MODE!=="official-only"){for(const a of CFG.aggregators)await processAggregator(a,run,state);}
-  await patch(`monitoring_runs?id=eq.${encodeURIComponent(run.id)}`,{finished_at:new Date().toISOString(),status:"Completed",sources_checked:sources.length,pages_scanned:state.pages,candidates_found:state.candidates,errors_count:state.errors,notes:`V11.0 mode=${MODE}; pages=${state.pages}; candidates=${state.candidates}; errors=${state.errors}; warnings=${state.warnings}`}, "finish run");
-  console.log(JSON.stringify({checked:sources.length,pages:state.pages,candidates:state.candidates,errors:state.errors,warnings:state.warnings,mode:MODE}));
-}
-main().catch(e=>{console.error("[FATAL]",e);process.exit(1);});
