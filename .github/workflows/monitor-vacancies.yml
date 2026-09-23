@@ -3,6 +3,7 @@ name: Foundryman vacancy monitor
 on:
   schedule:
     - cron: '30 2 * * *'
+
   workflow_dispatch:
 
 jobs:
@@ -13,8 +14,23 @@ jobs:
       contents: read
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install PDF extraction utility
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils
+
+      - name: Verify PDF extraction
+        run: |
+          pdftotext -v
 
       - name: Run source monitor
         env:
@@ -22,15 +38,18 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -o pipefail
+
           node scripts/monitor-sources.mjs 2>&1 | tee monitor-output.log
 
       - name: Show complete monitor log
         if: always()
         run: |
           echo "========== COMPLETE MONITOR LOG =========="
+
           if [ -f monitor-output.log ]; then
             cat monitor-output.log
           else
             echo "monitor-output.log was not created"
           fi
+
           echo "========== END MONITOR LOG =========="
