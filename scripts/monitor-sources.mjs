@@ -1,3 +1,8 @@
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
+
 const SUPABASE_URL = process.env.SUPABASE_URL?.replace(/\/$/, '')
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 
@@ -11,37 +16,12 @@ const headers = {
   'Content-Type': 'application/json',
 }
 
-async function api(path, opts = {}) {
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
-    ...opts,
-    headers: {
-      ...headers,
-      ...(opts.headers || {}),
-    },
-  })
+const REQUEST_TIMEOUT_MS = 20000
+const MAX_FETCH_RETRIES = 2
+const MAX_PAGES_PER_SOURCE = 5
+const MAX_LINKS_PER_PAGE = 50
+const MAX_CANDIDATES_PER_SOURCE = 25
 
-  if (!response.ok) {
-    throw new Error(`${response.status} ${await response.text()}`)
-  }
-
-  return response.status === 204 ? null : response.json()
-}
-
-function esc(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim()
-}
-
-function terms(value) {
-  return String(value || '')
-    .split(',')
-    .map((item) => esc(item).toLowerCase())
-    .filter(Boolean)
-}
-
-/*
- * Discovery terms are NOT treated as proof of eligibility.
- * They only help surface possible vacancies for manual verification.
- */
 const DISCOVERY_TERMS = [
   'foundryman',
   'foundry man',
@@ -71,17 +51,37 @@ const DISCOVERY_PAGE_TERMS = [
   'selection',
 ]
 
-const MAX_PAGES_PER_SOURCE = 4
-const MAX_LINKS_PER_PAGE = 40
-const MAX_CANDIDATES_PER_SOURCE = 25
-const REQUEST_TIMEOUT_MS = 15000
+async function api(path, opts = {}) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    ...opts,
+    headers: {
+      ...headers,
+      ...(opts.headers || {}),
+    },
+  })
+
+  if (!response.ok) {
+    throw new Error(`${response.status} ${await response.text()}`)
+  }
+
+  return response.status === 204 ? null : response.json()
+}
+
+function esc(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim()
+}
+
+function terms(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => esc(item).toLowerCase())
+    .filter(Boolean)
+}
 
 function normalizeUrl(rawUrl, baseUrl) {
   try {
     const url = new URL(rawUrl, baseUrl)
-
     url.hash = ''
-
     return url.href
   } catch {
     return null
@@ -94,10 +94,7 @@ function isHttpUrl(url) {
 
 function isSameHost(url, baseUrl) {
   try {
-    const a = new URL(url)
-    const b = new URL(baseUrl)
-
-    return a.hostname === b.hostname
+    return new URL(url).hostname === new URL(baseUrl).hostname
   } catch {
     return false
   }
@@ -110,12 +107,14 @@ function isPdf(url) {
 function looksLikeRelevantPage(title, url) {
   const haystack = `${title} ${url}`.toLowerCase()
 
-  return DISCOVERY_PAGE_TERMS.some((term) => haystack.includes(term))
+  return DISCOVERY_PAGE_TERMS.some((term) =>
+    haystack.includes(term)
+  )
 }
 
 function extractPageText(html) {
   return esc(
-    html
+    String(html || '')
       .replace(/<script[\s\S]*?<\/script>/gi, ' ')
       .replace(/<style[\s\S]*?<\/style>/gi, ' ')
       .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
@@ -143,11 +142,11 @@ function extractLinks(html, baseUrl) {
 
     if (!href || !isHttpUrl(href)) continue
 
-    const title = esc(match[2].replace(/<[^>]+>/g, ' '))
+    const title = esc(
+      match[2].replace(/<[^>]+>/g, ' ')
+    )
 
-    if (!title) continue
-
-    if (seen.has(href)) continue
+    if (!title || seen.has(href)) continue
 
     seen.add(href)
 
@@ -163,70 +162,170 @@ function extractLinks(html, baseUrl) {
 }
 
 function getContext(text, keyword, radius = 180) {
-  const lower = String(text || '').toLowerCase()
+  const source = String(text || '')
+  const lower = source.toLowerCase()
   const index = lower.indexOf(keyword.toLowerCase())
 
-  if (index === -1) {
-    return ''
-  }
+  if (index === -1) return ''
 
   const start = Math.max(0, index - radius)
-  const end = Math.min(text.length, index + keyword.length + radius)
+  const end = Math.min(
+    source.length,
+    index + keyword.length + radius
+  )
 
-  return esc(text.slice(start, end))
+  return esc(source.slice(start, end))
+}
+
+async function fetchWithNode(url) {
+  let lastError
+
+  for (let attempt = 1; attempt <= MAX_FETCH_RETRIES; attempt++) {
+    const controller = new AbortController()
+
+    const timer = setTimeout(
+      () => controller.abort(),
+      REQUEST_TIMEOUT_MS
+    )
+
+    try {
+      const response = await fetch(url, {
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: {
+          'user-agent':
+            'Mozilla/5.0 (compatible; FoundrymanJobsMonitor/2.0)',
+          accept:
+            'text/html,application/xhtml+xml,application/pdf,text/plain;q=0.9,*/*;q=0.5',
+        },
+      })
+
+      const contentType =
+        response.headers.get('content-type') || ''
+
+      const body = await response.text()
+
+      return {
+        status: response.status,
+        finalUrl: response.url || url,
+        contentType,
+        body,
+        method: 'node-fetch',
+      }
+    } catch (error) {
+      lastError = error
+
+      console.log(
+        `[RETRY] ${url} attempt ${attempt}/${MAX_FETCH_RETRIES}: ${error.message}`
+      )
+
+      if (attempt < MAX_FETCH_RETRIES) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, 1500)
+        )
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  throw lastError || new Error('fetch failed')
+}
+
+async function fetchWithCurl(url) {
+  const args = [
+    '-L',
+    '--silent',
+    '--show-error',
+    '--max-time',
+    '20',
+    '--connect-timeout',
+    '10',
+    '-A',
+    'Mozilla/5.0 (compatible; FoundrymanJobsMonitor/2.0)',
+    '-H',
+    'Accept: text/html,application/xhtml+xml,text/plain,*/*;q=0.8',
+    '-w',
+    '\n__STATUS__:%{http_code}\n__FINAL_URL__:%{url_effective}\n__CONTENT_TYPE__:%{content_type}\n',
+    url,
+  ]
+
+  const result = await execFileAsync(
+    'curl',
+    args,
+    {
+      maxBuffer: 10 * 1024 * 1024,
+    }
+  )
+
+  const output = result.stdout || ''
+
+  const statusMatch =
+    output.match(/__STATUS__:(\d+)/)
+
+  const finalUrlMatch =
+    output.match(/__FINAL_URL__:(.*)/)
+
+  const contentTypeMatch =
+    output.match(/__CONTENT_TYPE__:(.*)/)
+
+  const body = output
+    .replace(/\n__STATUS__:\d+\n[\s\S]*$/, '')
+
+  return {
+    status: Number(statusMatch?.[1] || 0),
+    finalUrl: esc(finalUrlMatch?.[1] || url),
+    contentType: esc(contentTypeMatch?.[1] || ''),
+    body,
+    method: 'curl',
+  }
 }
 
 async function fetchPage(url) {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
-
   try {
-    const response = await fetch(url, {
-      redirect: 'follow',
-      signal: controller.signal,
-      headers: {
-        'user-agent':
-          'FoundrymanJobsMonitor/2.0 (+official-source-monitor)',
-        accept:
-          'text/html,application/xhtml+xml,application/pdf,text/plain;q=0.9,*/*;q=0.5',
-      },
-    })
+    return await fetchWithNode(url)
+  } catch (nodeError) {
+    console.log(
+      `[FALLBACK] Node fetch failed for ${url}: ${nodeError.message}`
+    )
 
-    const contentType = response.headers.get('content-type') || ''
-
-    const buffer = await response.arrayBuffer()
-
-    const body = new TextDecoder('utf-8', {
-      fatal: false,
-    }).decode(buffer)
-
-    return {
-      status: response.status,
-      finalUrl: response.url || url,
-      contentType,
-      body,
+    try {
+      return await fetchWithCurl(url)
+    } catch (curlError) {
+      throw new Error(
+        `Node fetch: ${nodeError.message}; curl: ${curlError.message}`
+      )
     }
-  } finally {
-    clearTimeout(timer)
   }
 }
 
 async function fingerprint(url, title) {
-  const data = new TextEncoder().encode(`${url}|${title}`)
+  const data = new TextEncoder().encode(
+    `${url}|${title}`
+  )
 
-  const hash = await crypto.subtle.digest('SHA-256', data)
+  const hash = await crypto.subtle.digest(
+    'SHA-256',
+    data
+  )
 
   return Array.from(new Uint8Array(hash))
-    .map((value) => value.toString(16).padStart(2, '0'))
+    .map((value) =>
+      value.toString(16).padStart(2, '0')
+    )
     .join('')
 }
 
-function candidateTitle(link) {
-  if (link.title) return link.title
+function candidateTitle(item) {
+  if (item.title) return item.title
 
-  if (isPdf(link.url)) {
+  if (isPdf(item.url)) {
     try {
-      return decodeURIComponent(link.url.split('/').pop() || 'PDF Notification')
+      return (
+        decodeURIComponent(
+          item.url.split('/').pop() || ''
+        ) || 'PDF Notification'
+      )
     } catch {
       return 'PDF Notification'
     }
@@ -263,14 +362,9 @@ async function insertCandidate({
     fingerprint: fp,
   }
 
-  /*
-   * Discovery matches are intentionally included only in the snippet.
-   * They do not establish that the post is equivalent to Foundryman.
-   */
   if (discoveryMatches.length > 0) {
-    payload.snippet =
-      `${payload.snippet} Discovery terms: ${discoveryMatches.join(', ')}. ` +
-      `Discovered from page: ${pageUrl}`
+    payload.snippet +=
+      ` Discovery terms: ${discoveryMatches.join(', ')}.`
   }
 
   try {
@@ -284,11 +378,11 @@ async function insertCandidate({
 
     return true
   } catch (error) {
-    const message = String(error.message || '')
+    const message = String(error.message || '').toLowerCase()
 
     if (
-      message.toLowerCase().includes('duplicate') ||
-      message.toLowerCase().includes('unique constraint')
+      message.includes('duplicate') ||
+      message.includes('unique constraint')
     ) {
       return false
     }
@@ -322,13 +416,20 @@ async function main() {
   for (const source of sources) {
     checked++
 
-    const rootUrl = source.recruitment_url || source.official_url
+    const rootUrl =
+      source.recruitment_url || source.official_url
+
+    let sourcePages = 0
+    let sourceCandidates = 0
 
     try {
       const exactTerms = terms(source.search_keywords)
 
       const discoveryTerms = Array.from(
-        new Set([...exactTerms, ...DISCOVERY_TERMS])
+        new Set([
+          ...exactTerms,
+          ...DISCOVERY_TERMS,
+        ])
       )
 
       const queue = [
@@ -342,25 +443,17 @@ async function main() {
       const visited = new Set()
       const candidateUrls = new Set()
 
-      let scannedForSource = 0
-
       while (
         queue.length > 0 &&
-        scannedForSource < MAX_PAGES_PER_SOURCE
+        sourcePages < MAX_PAGES_PER_SOURCE
       ) {
         const current = queue.shift()
 
-        if (!current?.url) continue
-
-        const normalized = normalizeUrl(current.url, rootUrl)
+        const normalized =
+          normalizeUrl(current.url, rootUrl)
 
         if (!normalized) continue
         if (visited.has(normalized)) continue
-
-        /*
-         * Stay on the official source host.
-         * This prevents the monitor from wandering into unrelated domains.
-         */
         if (!isSameHost(normalized, rootUrl)) continue
 
         visited.add(normalized)
@@ -371,52 +464,64 @@ async function main() {
           response = await fetchPage(normalized)
         } catch (error) {
           console.log(
-            `[WARN] ${source.source_name}: ${normalized} -> ${error.message}`
+            `[ERROR] ${source.source_name}: ${normalized} -> ${error.message}`
           )
-          continue
+
+          throw error
         }
 
-        scannedForSource++
+        sourcePages++
         pages++
 
-        const contentType = response.contentType.toLowerCase()
+        const contentType =
+          response.contentType.toLowerCase()
 
         /*
-         * PDF:
-         * We discover and queue PDF URLs, but do not pretend that raw
-         * PDF bytes prove eligibility. The PDF is sent to admin review.
+         * PDF URLs are discovered from links.
+         * We do not parse arbitrary PDF bytes here.
          */
-        if (isPdf(normalized) || contentType.includes('application/pdf')) {
-          const pdfTitle = candidateTitle({
-            url: normalized,
-            title: current.title,
-          })
+        if (
+          isPdf(normalized) ||
+          contentType.includes('application/pdf')
+        ) {
+          const haystack =
+            `${current.title} ${normalized}`.toLowerCase()
 
-          const haystack = `${current.title} ${normalized}`.toLowerCase()
+          const exactMatches =
+            exactTerms.filter((term) =>
+              haystack.includes(term)
+            )
 
-          const exactMatches = exactTerms.filter((term) =>
-            haystack.includes(term)
-          )
-
-          const discoveryMatches = DISCOVERY_TERMS.filter((term) =>
-            haystack.includes(term)
-          )
+          const discoveryMatches =
+            DISCOVERY_TERMS.filter((term) =>
+              haystack.includes(term)
+            )
 
           if (
             exactMatches.length > 0 ||
             discoveryMatches.length > 0 ||
-            looksLikeRelevantPage(current.title, normalized)
+            looksLikeRelevantPage(
+              current.title,
+              normalized
+            )
           ) {
-            if (!candidateUrls.has(normalized)) {
+            if (
+              !candidateUrls.has(normalized) &&
+              sourceCandidates <
+                MAX_CANDIDATES_PER_SOURCE
+            ) {
               candidateUrls.add(normalized)
 
-              if (candidates < MAX_CANDIDATES_PER_SOURCE) {
-                const inserted = await insertCandidate({
+              const inserted =
+                await insertCandidate({
                   source,
                   run,
                   item: {
                     url: normalized,
-                    title: pdfTitle,
+                    title: candidateTitle({
+                      url: normalized,
+                      title: current.title,
+                    }),
                   },
                   matchedKeywords: exactMatches,
                   discoveryMatches,
@@ -427,7 +532,9 @@ async function main() {
                     `Manual verification is required before publication.`,
                 })
 
-                if (inserted) candidates++
+              if (inserted) {
+                candidates++
+                sourceCandidates++
               }
             }
           }
@@ -435,56 +542,58 @@ async function main() {
           continue
         }
 
-        /*
-         * HTML/text page analysis.
-         */
-        const pageText = extractPageText(response.body)
+        const pageText =
+          extractPageText(response.body)
 
-        const exactMatches = findKeywordMatches(pageText, exactTerms)
+        const exactMatches =
+          findKeywordMatches(
+            pageText,
+            exactTerms
+          )
 
-        const discoveryMatches = findKeywordMatches(
-          pageText,
-          discoveryTerms
-        )
+        const discoveryMatches =
+          findKeywordMatches(
+            pageText,
+            discoveryTerms
+          )
 
-        /*
-         * Extract all links from the current official page.
-         */
-        const pageLinks = extractLinks(response.body, response.finalUrl)
+        const pageLinks =
+          extractLinks(
+            response.body,
+            response.finalUrl
+          )
 
-        /*
-         * Candidate links:
-         * - exact keyword in title/URL
-         * - discovery keyword in title/URL
-         * - relevant recruitment/career/notice link
-         */
         for (const link of pageLinks) {
-          if (candidateUrls.size >= MAX_CANDIDATES_PER_SOURCE) break
+          if (
+            candidateUrls.size >=
+            MAX_CANDIDATES_PER_SOURCE
+          ) {
+            break
+          }
 
-          if (!isSameHost(link.url, rootUrl)) continue
+          if (!isSameHost(link.url, rootUrl)) {
+            continue
+          }
 
           const haystack =
             `${link.title} ${link.url}`.toLowerCase()
 
-          const linkExactMatches = exactTerms.filter((term) =>
-            haystack.includes(term)
-          )
+          const linkExactMatches =
+            exactTerms.filter((term) =>
+              haystack.includes(term)
+            )
 
-          const linkDiscoveryMatches = DISCOVERY_TERMS.filter((term) =>
-            haystack.includes(term)
-          )
+          const linkDiscoveryMatches =
+            DISCOVERY_TERMS.filter((term) =>
+              haystack.includes(term)
+            )
 
-          const relevantPageLink = looksLikeRelevantPage(
-            link.title,
-            link.url
-          )
+          const relevantPageLink =
+            looksLikeRelevantPage(
+              link.title,
+              link.url
+            )
 
-          /*
-           * A link is interesting if:
-           * 1. exact configured keyword is present, OR
-           * 2. discovery keyword is present, OR
-           * 3. it looks like a recruitment/career/notice page.
-           */
           const interesting =
             linkExactMatches.length > 0 ||
             linkDiscoveryMatches.length > 0 ||
@@ -493,53 +602,54 @@ async function main() {
           if (!interesting) continue
 
           /*
-           * If this is a PDF, surface it as a candidate.
+           * PDF candidate
            */
           if (isPdf(link.url)) {
-            if (candidateUrls.has(link.url)) continue
+            if (candidateUrls.has(link.url)) {
+              continue
+            }
 
             candidateUrls.add(link.url)
 
-            const snippet =
-              exactMatches.length > 0
-                ? getContext(
-                    pageText,
-                    exactMatches[0]
-                  )
-                : `Potential official PDF linked from ${source.source_name}.`
+            const inserted =
+              await insertCandidate({
+                source,
+                run,
+                item: link,
+                matchedKeywords: [
+                  ...new Set([
+                    ...exactMatches,
+                    ...linkExactMatches,
+                  ]),
+                ],
+                discoveryMatches: [
+                  ...new Set([
+                    ...discoveryMatches,
+                    ...linkDiscoveryMatches,
+                  ]),
+                ],
+                pageUrl: normalized,
+                sourceStatus: response.status,
+                snippet:
+                  `Potential official PDF linked from ${source.source_name}. ` +
+                  `Manual verification is required before publication.`,
+              })
 
-            const inserted = await insertCandidate({
-              source,
-              run,
-              item: link,
-              matchedKeywords: [
-                ...new Set([
-                  ...exactMatches,
-                  ...linkExactMatches,
-                ]),
-              ],
-              discoveryMatches: [
-                ...new Set([
-                  ...discoveryMatches,
-                  ...linkDiscoveryMatches,
-                ]),
-              ],
-              pageUrl: normalized,
-              sourceStatus: response.status,
-              snippet,
-            })
-
-            if (inserted) candidates++
+            if (inserted) {
+              candidates++
+              sourceCandidates++
+            }
 
             continue
           }
 
           /*
-           * HTML recruitment/career pages are queued for deeper scanning.
+           * Queue relevant HTML pages for deeper scanning.
            */
           if (
             current.depth < 2 &&
-            queue.length < MAX_PAGES_PER_SOURCE * 3
+            queue.length <
+              MAX_PAGES_PER_SOURCE * 3
           ) {
             queue.push({
               url: link.url,
@@ -549,81 +659,84 @@ async function main() {
           }
 
           /*
-           * If the link itself contains an exact Foundryman keyword,
-           * surface it immediately as a candidate too.
+           * Exact keyword in link.
            */
-          if (linkExactMatches.length > 0) {
-            if (candidateUrls.has(link.url)) continue
-
+          if (
+            linkExactMatches.length > 0 &&
+            !candidateUrls.has(link.url)
+          ) {
             candidateUrls.add(link.url)
 
-            const snippet =
-              exactMatches.length > 0
-                ? getContext(pageText, exactMatches[0])
-                : `Exact configured keyword found in official link: ${link.title}`
+            const inserted =
+              await insertCandidate({
+                source,
+                run,
+                item: link,
+                matchedKeywords: [
+                  ...new Set([
+                    ...exactMatches,
+                    ...linkExactMatches,
+                  ]),
+                ],
+                discoveryMatches: [
+                  ...new Set([
+                    ...discoveryMatches,
+                    ...linkDiscoveryMatches,
+                  ]),
+                ],
+                pageUrl: normalized,
+                sourceStatus: response.status,
+                snippet:
+                  getContext(
+                    pageText,
+                    linkExactMatches[0]
+                  ) ||
+                  `Exact configured keyword found in official link: ${link.title}`,
+              })
 
-            const inserted = await insertCandidate({
-              source,
-              run,
-              item: link,
-              matchedKeywords: [
-                ...new Set([
-                  ...exactMatches,
-                  ...linkExactMatches,
-                ]),
-              ],
-              discoveryMatches: [
-                ...new Set([
-                  ...discoveryMatches,
-                  ...linkDiscoveryMatches,
-                ]),
-              ],
-              pageUrl: normalized,
-              sourceStatus: response.status,
-              snippet,
-            })
-
-            if (inserted) candidates++
+            if (inserted) {
+              candidates++
+              sourceCandidates++
+            }
           }
         }
 
         /*
-         * If the actual page itself contains an exact configured keyword,
-         * create a candidate for that official page when there is no more
-         * specific matching link.
+         * Exact keyword on current page.
          */
         if (
           exactMatches.length > 0 &&
-          candidateUrls.size < MAX_CANDIDATES_PER_SOURCE
+          !candidateUrls.has(response.finalUrl) &&
+          sourceCandidates <
+            MAX_CANDIDATES_PER_SOURCE
         ) {
-          const pageCandidateUrl = response.finalUrl || normalized
+          candidateUrls.add(response.finalUrl)
 
-          if (!candidateUrls.has(pageCandidateUrl)) {
-            candidateUrls.add(pageCandidateUrl)
-
-            const pageTitle =
-              current.title ||
-              source.source_name ||
-              'Potential Vacancy Page'
-
-            const inserted = await insertCandidate({
+          const inserted =
+            await insertCandidate({
               source,
               run,
               item: {
-                url: pageCandidateUrl,
-                title: pageTitle,
+                url: response.finalUrl,
+                title:
+                  current.title ||
+                  source.source_name ||
+                  'Potential Vacancy Page',
               },
               matchedKeywords: exactMatches,
               discoveryMatches,
               pageUrl: normalized,
               sourceStatus: response.status,
-              snippet: getContext(
-                pageText,
-                exactMatches[0]
-              ),
+              snippet:
+                getContext(
+                  pageText,
+                  exactMatches[0]
+                ),
             })
 
-            if (inserted) candidates++
+          if (inserted) {
+            candidates++
+            sourceCandidates++
           }
         }
       }
@@ -636,16 +749,21 @@ async function main() {
             Prefer: 'return=minimal',
           },
           body: JSON.stringify({
-            last_checked: new Date().toISOString(),
-            last_status: `HTTP ${200}`,
+            last_checked:
+              new Date().toISOString(),
+            last_status:
+              `HTTP scan completed`,
             last_error: null,
-            updated_at: new Date().toISOString(),
+            updated_at:
+              new Date().toISOString(),
           }),
         }
       )
 
       console.log(
-        `[OK] ${source.source_name}: scanned=${scannedForSource}, candidates=${candidateUrls.size}`
+        `[OK] ${source.source_name}: ` +
+          `pages=${sourcePages}, ` +
+          `candidates=${sourceCandidates}`
       )
     } catch (error) {
       errors++
@@ -658,10 +776,13 @@ async function main() {
             Prefer: 'return=minimal',
           },
           body: JSON.stringify({
-            last_checked: new Date().toISOString(),
+            last_checked:
+              new Date().toISOString(),
             last_status: 'ERROR',
-            last_error: String(error.message).slice(0, 500),
-            updated_at: new Date().toISOString(),
+            last_error:
+              String(error.message).slice(0, 500),
+            updated_at:
+              new Date().toISOString(),
           }),
         }
       )
@@ -680,14 +801,18 @@ async function main() {
         Prefer: 'return=minimal',
       },
       body: JSON.stringify({
-        finished_at: new Date().toISOString(),
+        finished_at:
+          new Date().toISOString(),
         sources_checked: checked,
         pages_scanned: pages,
         candidates_found: candidates,
         errors_count: errors,
-        status: errors === checked ? 'Failed' : 'Completed',
+        status:
+          errors === checked
+            ? 'Failed'
+            : 'Completed',
         notes:
-          'V5 free-tier source discovery. Official-source pages and candidate links are scanned. Candidates require manual official verification before publication.',
+          'V6 free-tier source monitor with retry and curl fallback. Candidates require manual official verification before publication.',
       }),
     }
   )
