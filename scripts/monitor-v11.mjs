@@ -40,6 +40,40 @@ const clean = v => String(v||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim
 const trunc = (v,n=1400) => { const s=clean(v); return s.length>n?s.slice(0,n)+"…":s; };
 const sleep = ms => new Promise(r=>setTimeout(r,ms));
 const http = u => /^https?:\/\//i.test(u);
+const domainLocks = new Map();
+const domainNextAt = new Map();
+const domainFailures = new Map();
+
+async function withDomainLock(url, fn){
+  const h=host(url);
+  if(!h)return fn();
+  const prev=domainLocks.get(h)||Promise.resolve();
+  let release;
+  const gate=new Promise(r=>{release=r});
+  domainLocks.set(h,prev.then(()=>gate));
+  await prev;
+  try{
+    const next=domainNextAt.get(h)||0;
+    if(next>Date.now())await sleep(next-Date.now());
+    domainNextAt.set(h,Date.now()+450);
+    return await fn();
+  }finally{
+    release();
+    if(domainLocks.get(h)===gate)domainLocks.delete(h);
+  }
+}
+function transientError(err){
+  const m=String(err?.message||err||"").toLowerCase();
+  return /http (429|502|503|504)\b|timed? ?out|timeout|aborted|abort|fetch failed|network|socket|econn|enotfound|reset|curl exit/.test(m);
+}
+function retryAfterMs(value){
+  const s=String(value||"").trim();
+  if(!s)return 0;
+  const n=Number(s);
+  if(Number.isFinite(n))return Math.min(15000,Math.max(0,n*1000));
+  const t=Date.parse(s);
+  return Number.isNaN(t)?0:Math.min(15000,Math.max(0,t-Date.now()));
+}
 const host = u => { try{return new URL(u).hostname.toLowerCase().replace(/^www\./,"")}catch{return ""} };
 const pdf = u => /\.pdf(?:$|[?#])/i.test(u);
 const normalize = (u,b) => { try{return new URL(u,b).href.split("#")[0]}catch{return null} };
@@ -109,25 +143,55 @@ const post=(p,b,l)=>api(p,{method:"POST",body:JSON.stringify(b),headers:{Prefer:
 const patch=(p,b,l)=>api(p,{method:"PATCH",body:JSON.stringify(b),headers:{Prefer:"return=minimal"}},l);
 
 async function fetchUrl(url, timeout, label){
-  let last;
-  try{
-    const c=new AbortController(), t=setTimeout(()=>c.abort(),timeout);
-    const r=await fetch(url,{redirect:"follow",signal:c.signal,headers:{
-      "User-Agent":CFG.userAgent,Accept:"text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8","Accept-Language":"en-IN,en;q=0.9"
-    }});
-    clearTimeout(t);
-    const b=Buffer.from(await r.arrayBuffer());
-    if(r.ok&&b.length)return {status:r.status,type:r.headers.get("content-type")||"",url:r.url||url,buffer:b};
-    last=new Error(`HTTP ${r.status}`);
-  }catch(e){last=e;}
-  if(String(last?.message||"").toLowerCase().includes("abort")) throw last;
-  const args=["-L","--compressed","--silent","--show-error","--connect-timeout","8","--max-time",String(CFG.curlTimeout),"-A",CFG.userAgent,"-H","Accept: text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8","-w","\n__STATUS__:%{http_code}\n__TYPE__:%{content_type}\n__URL__:%{url_effective}\n",url];
-  const r=await new Promise((resolve,reject)=>{
-    const p=spawn("curl",args),o=[],e=[];p.stdout.on("data",d=>o.push(d));p.stderr.on("data",d=>e.push(d));
-    p.on("error",reject);p.on("close",code=>{const s=Buffer.concat(o).toString(),err=Buffer.concat(e).toString();const m=s.match(/\n__STATUS__:(\d+)/),tm=s.match(/\n__TYPE__:(.*?)\s*$/m),um=s.match(/\n__URL__:(.*?)\s*$/m);let end=s.length;for(const x of ["\n__STATUS__:","\n__TYPE__:","\n__URL__:"]){const i=s.indexOf(x);if(i>=0)end=Math.min(end,i);}const body=Buffer.from(s.slice(0,end));const status=m?+m[1]:0;if(code!==0&&body.length===0)return reject(new Error(`curl exit ${code}: ${trunc(err,300)}`));resolve({status,type:tm?tm[1].trim():"",url:um?um[1].trim():url,buffer:body});});
-  });
-  if(r.status>=200&&r.status<400&&r.buffer.length)return r;
-  throw new Error(`HTTP ${r.status||"unknown"}`);
+  const h=host(url);
+  for(let attempt=1;attempt<=3;attempt++){
+    try{
+      const result=await withDomainLock(url,async()=>{
+        let responseError=null;
+        try{
+          const ctl=new AbortController(), timer=setTimeout(()=>ctl.abort(),timeout);
+          const r=await fetch(url,{redirect:"follow",signal:ctl.signal,headers:{
+            "User-Agent":CFG.userAgent,Accept:"text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8","Accept-Language":"en-IN,en;q=0.9"
+          }});
+          clearTimeout(timer);
+          const buf=Buffer.from(await r.arrayBuffer());
+          if(r.ok&&buf.length)return {status:r.status,type:r.headers.get("content-type")||"",url:r.url||url,buffer:buf};
+          const ra=r.headers.get("retry-after")||"";
+          responseError=new Error("HTTP "+r.status+(ra?" RETRY-AFTER "+ra:""));
+        }catch(e){responseError=e;}
+        if(String(responseError?.message||"").toLowerCase().includes("abort"))throw responseError;
+        const args=["-L","--compressed","--silent","--show-error","--connect-timeout","8","--max-time",String(CFG.curlTimeout),"-A",CFG.userAgent,"-H","Accept: text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8","-w","\\n__STATUS__:%{http_code}\\n__TYPE__:%{content_type}\\n__URL__:%{url_effective}\\n",url];
+        const r=await new Promise((resolve,reject)=>{
+          const p=spawn("curl",args),o=[],err=[];
+          p.stdout.on("data",d=>o.push(d));p.stderr.on("data",d=>err.push(d));
+          p.on("error",reject);p.on("close",code=>{
+            const raw=Buffer.concat(o).toString(), stderr=Buffer.concat(err).toString();
+            const m=raw.match(/\\n__STATUS__:(\\d+)/), tm=raw.match(/\\n__TYPE__:(.*?)\\s*$/m), um=raw.match(/\\n__URL__:(.*?)\\s*$/m);
+            let end=raw.length;
+            for(const marker of ["\\n__STATUS__:","\\n__TYPE__:","\\n__URL__:"]){const i=raw.indexOf(marker);if(i>=0)end=Math.min(end,i);}
+            const body=Buffer.from(raw.slice(0,end)), status=m?+m[1]:0;
+            if(code!==0&&body.length===0)return reject(new Error("curl exit "+code+": "+trunc(stderr,300)));
+            resolve({status,type:tm?tm[1].trim():"",url:um?um[1].trim():url,buffer:body});
+          });
+        });
+        if(r.status>=200&&r.status<400&&r.buffer.length)return r;
+        throw new Error("HTTP "+(r.status||"unknown"));
+      });
+      domainFailures.delete(h);
+      return result;
+    }catch(e){
+      const msg=String(e?.message||e);
+      if(!transientError(e)||attempt===3)throw e;
+      const ra=(msg.match(/RETRY-AFTER\s+([^\s]+)/i)||[])[1];
+      const retryMs=retryAfterMs(ra);
+      const failures=(domainFailures.get(h)||0)+1;
+      domainFailures.set(h,failures);
+      const cooldown=failures>=2?30000:0;
+      domainNextAt.set(h,Math.max(domainNextAt.get(h)||0,Date.now()+cooldown));
+      await sleep(Math.max(retryMs,attempt===1?1000:2500));
+    }
+  }
+  throw new Error("fetch failed: "+label);
 }
 
 async function extractPdf(buf,url){
