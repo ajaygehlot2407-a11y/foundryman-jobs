@@ -247,7 +247,7 @@ async function discoverSitemaps(rootUrls){
         const g=await fetchUrl(u,8000,"sitemap discovery");
         const raw=g.buffer.toString("utf8");
         if(/<sitemap|<urlset|Sitemap:/i.test(raw)){
-          const declared=[...raw.matchAll(/(?:Sitemap:\s*|<loc>)(https?:\\/\\/[^<\\s]+)(?:<\\/loc>)?/gi)].map(m=>m[1]);
+          const declared=[...raw.matchAll(/(?:Sitemap:\s*|<loc>)(https?:\/\/[^<\s]+)(?:<\/loc>)?/gi)].map(m=>m[1]);
           const maps=[u,...declared].filter((x,i,a)=>http(x)&&a.indexOf(x)===i).slice(0,8);
           for(const sm of maps){
             try{
