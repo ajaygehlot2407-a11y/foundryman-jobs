@@ -1280,7 +1280,8 @@ async function runWithConcurrency(
 
 async function main() {
   console.log("==============================================");
-  console.log("FOUNDRYMAN VACANCY MONITOR V10.3");\n  console.log("Fast profile: bounded crawl + timeout-aware fallback");
+  console.log("FOUNDRYMAN VACANCY MONITOR V10.3");
+  console.log("Fast profile: bounded crawl + timeout-aware fallback");
   console.log("==============================================");
   console.log(
     `Max pages/source: ${CONFIG.MAX_PAGES_PER_SOURCE}`
