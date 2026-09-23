@@ -15,8 +15,8 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       MONITOR_MODE: official-only
-      SOURCE_LIMIT: "10"
-      SOURCE_NAMES: ""
+      SOURCE_LIMIT: "0"
+      SOURCE_NAMES: "CSIR-CMERI,DGT / Bharat Skills,NCS Government Portals Directory,Railway Recruitment Control Board,BHEL Careers"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
