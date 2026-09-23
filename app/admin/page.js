@@ -106,7 +106,15 @@ export default function AdminPage() {
   }
   async function loadCandidates() {
     const { data, error } = await sb.from('vacancy_candidates').select('*').eq('review_status', 'Pending Review').order('confidence_score', { ascending: false }).order('discovered_at', { ascending: false }).limit(100)
-    if (!error) setCandidates(data || [])
+    if (error) { setCandidates([]); return }
+    const rows = data || []
+    const sourceIds = [...new Set(rows.map(r => r.source_id).filter(Boolean))]
+    let sourceMap = {}
+    if (sourceIds.length) {
+      const { data: sources } = await sb.from('source_registry').select('id, source_name, organization').in('id', sourceIds)
+      sourceMap = Object.fromEntries((sources || []).map(s => [s.id, s]))
+    }
+    setCandidates(rows.map(r => ({ ...r, source_name: sourceMap[r.source_id]?.source_name || sourceMap[r.source_id]?.organization || 'Discovery / aggregator' })))
   }
   async function loadRows() {
     const { data, error } = await sb.from('vacancies').select('*').order('created_at', { ascending: false })
