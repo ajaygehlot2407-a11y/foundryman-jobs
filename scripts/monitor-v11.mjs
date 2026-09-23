@@ -282,8 +282,13 @@ async function candidate({sourceId,runId,sourceName,organization="",url,title,te
   const trade=/\b(iti|ncvt|scvt|ntc|nac|apprentice|trade certificate)\b/i.test(body), sc=score(title,url,text);
   const bodyStrongHit=CFG.strong.some(t=>body.includes(t));
   const foundryRecruitTrade=CFG.foundry.some(t=>body.includes(t)) && recruit && trade;
-  if(matched.length===0 || (!strongHit && !bodyStrongHit && !foundryRecruitTrade && sc<60))return false;
+  const evidenceHit=matched.length>0;
+  if(!evidenceHit)return false;
   if(CFG.exclude.some(x=>head.includes(x))&&!strongHit)return false;
+  // A direct official document containing strong Foundryman evidence is valid for review,
+  // even when the document is an ITI/curriculum/technical PDF rather than a vacancy.
+  // Keep it in the review queue so verification can classify it instead of silently dropping it.
+  if(!strongHit && !bodyStrongHit && !foundryRecruitTrade && sc<60)return false;
   const canonical=canonicalUrl(url), fp=fingerprint(canonical,title,organization);
   const existing=await get("vacancy_candidates?select=id&fingerprint=eq."+encodeURIComponent(fp)+"&limit=1","candidate dedupe").catch(()=>[]);
   if(Array.isArray(existing)&&existing.length)return false;
