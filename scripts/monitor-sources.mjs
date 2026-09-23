@@ -28,7 +28,7 @@ const CONFIG = {
   USER_AGENT:
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
     "(KHTML, like Gecko) Chrome/131.0 Safari/537.36 " +
-    "FoundrymanJobsMonitor/10.5",
+    "FoundrymanJobsMonitor/10.6",
 
   DISCOVERY_TERMS: [
     "foundryman",
@@ -151,6 +151,34 @@ function classifyError(error) {
   if (message.includes("pdf exceeds")) return "PDF_TOO_LARGE";
   if (message.includes("curl")) return "CURL";
   return "OTHER";
+}
+
+function recordWarning(state, source, url, error, scope = "resource") {
+  const message = formatError(error);
+  const category = classifyError(error);
+  state.warnings += 1;
+  state.warningCounts[category] = (state.warningCounts[category] || 0) + 1;
+
+  const key = source?.source_name || "Unknown source";
+  state.sourceStats[key] = state.sourceStats[key] || {
+    pages: 0,
+    errors: 0,
+    warnings: 0,
+    errorMessages: [],
+  };
+  state.sourceStats[key].warnings = (state.sourceStats[key].warnings || 0) + 1;
+
+  if (state.sourceStats[key].errorMessages.length < 5) {
+    state.sourceStats[key].errorMessages.push({
+      category: `WARNING_${category}`,
+      url: truncate(url || "", 500),
+      message: truncate(message, 500),
+    });
+  }
+
+  console.log(
+    `[WARNING] ${scope} | ${key} | ${category} | ${truncate(url || "", 500)} | ${truncate(message, 500)}`
+  );
 }
 
 function recordError(state, source, url, error, scope = "resource") {
@@ -1086,15 +1114,19 @@ async function maybeCreateCandidate({
 }
 
 async function processSource(source, state) {
-  const sourceUrl =
-    source.recruitment_url ||
-    source.official_url;
+  const sourceUrls = [
+    source.recruitment_url,
+    source.official_url,
+  ].filter(
+    (url, index, array) =>
+      isHttpUrl(url) && array.indexOf(url) === index
+  );
 
-  if (!sourceUrl || !isHttpUrl(sourceUrl)) {
+  if (sourceUrls.length === 0) {
     recordError(
       state,
       source,
-      sourceUrl,
+      "",
       new Error("No valid official/recruitment URL"),
       "source-config"
     );
@@ -1105,13 +1137,12 @@ async function processSource(source, state) {
     `\n========== SOURCE: ${source.source_name} ==========`
   );
 
-  console.log(
-    `[SOURCE] ${sourceUrl}`
-  );
-
   const queue = [];
   const queued = new Set();
   const visited = new Set();
+  const allowedHosts = new Set(
+    sourceUrls.map((url) => normalizeHost(new URL(url).hostname))
+  );
 
   const addQueue = (url, title = "", isSource = false) => {
     if (!url || !isHttpUrl(url)) return;
@@ -1122,12 +1153,14 @@ async function processSource(source, state) {
       return;
     }
 
-    /*
-     * Keep crawling within the official organization's hostname.
-     * This avoids accidentally crawling Google, social media,
-     * unrelated aggregators, etc.
-     */
-    if (!sameOfficialSite(normalized, sourceUrl)) {
+    try {
+      const host = normalizeHost(new URL(normalized).hostname);
+      const allowed = [...allowedHosts].some(
+        (base) => host === base || host.endsWith(`.${base}`) || base.endsWith(`.${host}`)
+      );
+
+      if (!allowed) return;
+    } catch {
       return;
     }
 
@@ -1140,25 +1173,22 @@ async function processSource(source, state) {
     });
   };
 
-  addQueue(sourceUrl, source.source_name, true);
-
-  if (
-    source.recruitment_url &&
-    source.recruitment_url !== sourceUrl
-  ) {
+  for (const url of sourceUrls) {
     addQueue(
-      source.recruitment_url,
-      "Recruitment",
+      url,
+      url === source.recruitment_url ? "Recruitment" : source.source_name,
       true
     );
   }
 
   let localPages = 0;
   let localErrors = 0;
+  let localWarnings = 0;
 
   state.sourceStats[source.source_name] = state.sourceStats[source.source_name] || {
     pages: 0,
     errors: 0,
+    warnings: 0,
     errorMessages: [],
   };
 
@@ -1205,29 +1235,43 @@ async function processSource(source, state) {
           );
 
           if (
-            queue.length >=
-            CONFIG.MAX_LINKS_PER_PAGE
+            queue.length >= CONFIG.MAX_LINKS_PER_PAGE
           ) {
             break;
           }
         }
       }
     } catch (error) {
-      localErrors += 1;
-      recordError(
-        state,
-        source,
-        resource.url,
-        error,
-        "resource"
-      );
+      if (resource.isSource) {
+        localErrors += 1;
+        recordError(
+          state,
+          source,
+          resource.url,
+          error,
+          "source"
+        );
+      } else {
+        localWarnings += 1;
+        recordWarning(
+          state,
+          source,
+          resource.url,
+          error,
+          "child-link"
+        );
+      }
     }
   }
 
   const sourceStat = state.sourceStats[source.source_name];
   const sourceErrorText = sourceStat?.errorMessages?.length
     ? sourceStat.errorMessages
-        .map((item) => "[" + item.category + "] " + item.message + " | " + item.url)
+        .slice(0, 5)
+        .map(
+          (item) =>
+            `[${item.category}] ${item.message} | ${item.url}`
+        )
         .join(" || ")
     : null;
 
@@ -1236,7 +1280,12 @@ async function processSource(source, state) {
       `source_registry?id=eq.${encodeURIComponent(source.id)}`,
       {
         last_checked: new Date().toISOString(),
-        last_status: localErrors > 0 ? "Error" : "OK",
+        last_status:
+          localErrors > 0
+            ? "Error"
+            : localWarnings > 0
+              ? "OK with warnings"
+              : "OK",
         last_error: sourceErrorText
           ? truncate(sourceErrorText, 1000)
           : null,
@@ -1250,7 +1299,7 @@ async function processSource(source, state) {
   }
 
   console.log(
-    `[SOURCE-RESULT] ${source.source_name}: pages=${localPages}, errors=${localErrors}`
+    `[SOURCE-RESULT] ${source.source_name}: pages=${localPages}, errors=${localErrors}, warnings=${localWarnings}`
   );
 }
 
@@ -1297,7 +1346,7 @@ async function runWithConcurrency(
 
 async function main() {
   console.log("==============================================");
-  console.log("FOUNDRYMAN VACANCY MONITOR V10.5");
+  console.log("FOUNDRYMAN VACANCY MONITOR V10.6");
   console.log("Fast profile: bounded crawl + timeout-aware fallback");
   console.log("==============================================");
   console.log(
@@ -1354,7 +1403,7 @@ async function main() {
         pages_scanned: 0,
         candidates_found: 0,
         errors_count: 0,
-        notes: "V10.5 PDF-aware discovery monitor started",
+        notes: "V10.6 source-failure and child-link warning separation",
       },
       "create monitoring run"
     );
@@ -1384,7 +1433,9 @@ async function main() {
     pagesScanned: 0,
     candidatesFound: 0,
     errors: 0,
+    warnings: 0,
     errorCounts: {},
+    warningCounts: {},
     sourceStats: {},
     fingerprints: new Set(),
   };
@@ -1443,7 +1494,9 @@ async function main() {
     pages: state.pagesScanned,
     candidates: state.candidatesFound,
     errors: state.errors,
+    warnings: state.warnings,
     errorBreakdown: state.errorCounts,
+    warningBreakdown: state.warningCounts,
   };
 
   console.log(JSON.stringify(summary));
