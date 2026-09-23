@@ -213,8 +213,19 @@ async function extractPdf(buf,url){
 function parseHtml(raw,base){
   const title=clean((raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i)||[])[1]||"");
   const text=clean(raw.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<noscript[\s\S]*?<\/noscript>/gi," ").replace(/<svg[\s\S]*?<\/svg>/gi," ").replace(/<[^>]+>/g," "));
-  const links=[];const re=/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;let m;
-  while((m=re.exec(raw))&&links.length<CFG.maxLinksPerPage){const u=normalize(m[1],base);if(http(u))links.push({url:u,text:clean(m[2].replace(/<[^>]+>/g," "))});}
+  const links=[],seenLinks=new Set();
+  const addLink=(rawUrl,label="")=>{
+    const u=normalize(rawUrl,base);
+    if(!http(u)||seenLinks.has(u)||links.length>=CFG.maxLinksPerPage)return;
+    seenLinks.add(u);links.push({url:u,text:clean(label)});
+  };
+  const re=/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;let m;
+  while((m=re.exec(raw))&&links.length<CFG.maxLinksPerPage)addLink(m[1],m[2].replace(/<[^>]+>/g," "));
+  const attrRe=/(?:href|data-href|data-url|data-download|src)\s*=\s*["']([^"']+)["']/gi;
+  while((m=attrRe.exec(raw))&&links.length<CFG.maxLinksPerPage){
+    const u=m[1];
+    if(/\.pdf(?:$|[?#])|\/(?:uploads?|documents?|download(?:s)?|sites\/default\/files|wp-content\/uploads)\//i.test(u))addLink(u,"document");
+  }
   return {title,text,links};
 }
 
@@ -222,14 +233,14 @@ function linkRank(l){
   const v=(clean(l.text)+" "+l.url).toLowerCase();let n=0;
   if(/foundryman|foundry[ -]?man|moulder|molder/.test(v))n+=100;
   if(/foundry|apprentice|vacancy|recruitment|notification|advertisement|iti/.test(v))n+=50;
-  if(/\.pdf(?:$|[?#])|uploads|documents|download/.test(v))n+=35;
-  if(/career|job|employment/.test(v))n+=15;
+  if(/\.pdf(?:$|[?#])|uploads|documents|download|sites\/default\/files|wp-content\/uploads/.test(v))n+=45;
+  if(/career|job|employment|view|details/.test(v))n+=15;
   return n;
 }
 function crawlable(l){
   const v=(clean(l.text)+" "+l.url).toLowerCase();
   if(CFG.exclude.some(x=>v.includes(x)))return false;
-  return /foundry|moulder|molder|recruit|vacanc|career|job|apprentice|notification|advertisement|iti|\.pdf|uploads|documents|download/.test(v);
+  return /foundry|moulder|molder|recruit|vacanc|career|job|apprentice|notification|advertisement|iti|\.pdf|uploads|documents|download|sites\/default\/files|wp-content\/uploads/.test(v);
 }
 
 async function candidate({sourceId,runId,sourceName,organization="",url,title,text,documentType,status,discoveryMethod,verificationUrl}){
@@ -282,7 +293,7 @@ async function processSource(source,run,state){
       console.log(`[SOURCE-TIMEOUT] ${source.source_name} budget=${CFG.sourceBudgetMs}ms pages=${pages}`);
       break;
     }
-    q.sort((a,b)=>(b.isRoot-a.isRoot)||(b.depth-a.depth?0:linkRank({text:b.title,url:b.url})-linkRank({text:a.title,url:a.url})));
+    q.sort((a,b)=>(b.isRoot-a.isRoot)||(linkRank({text:b.title,url:b.url})-linkRank({text:a.title,url:a.url}))||(a.depth-b.depth));
     const r=q.shift();if(seen.has(r.url))continue;seen.add(r.url);
     try{
       const got=await fetchUrl(r.url,r.isRoot?CFG.sourceTimeout:CFG.pageTimeout,`${source.source_name} ${r.url}`);
