@@ -340,9 +340,16 @@ async function processSource(source,run,state){
       let title="",text="",links=[];
       if(type==="PDF"){text=await extractPdf(got.buffer,got.url);title=decodeURIComponent(got.url.split("/").pop()||"PDF");}
       else {const p=parseHtml(got.buffer.toString("utf8"),got.url);title=p.title||r.title;text=p.text;links=p.links;}
-      if(text)await candidate({sourceId:source.id,runId:run.id,sourceName:source.source_name,organization:source.organization,url:got.url,title,text,documentType:type,status:"Official Source",discoveryMethod:type==="PDF"?"official-targeted-pdf":"official-targeted-page",verificationUrl:got.url}).then(x=>{if(x)state.candidates++;});
+      if(text){
+        const matchedNow=termsIn(title+" "+got.url+" "+text);
+        if(matchedNow.length) console.log(`[EVIDENCE] ${source.source_name} type=${type} terms=${matchedNow.join("|")} title=${trunc(title,180)} url=${got.url}`);
+        await candidate({sourceId:source.id,runId:run.id,sourceName:source.source_name,organization:source.organization,url:got.url,title,text,documentType:type,status:"Official Source",discoveryMethod:type==="PDF"?"official-targeted-pdf":"official-targeted-page",verificationUrl:got.url}).then(x=>{if(x)state.candidates++;});
+      }
       if(type==="HTML"&&r.depth<st.depth){
-        for(const l of links.filter(crawlable).sort((a,b)=>linkRank(b)-linkRank(a)).slice(0,CFG.maxLinksPerPage))push(l.url,l.text,r.depth+1,false);
+        for(const l of links.filter(crawlable).sort((a,b)=>linkRank(b)-linkRank(a)).slice(0,CFG.maxLinksPerPage)){
+          if(/\\.pdf(?:$|[?#])|\\/(?:uploads?|documents?|download(?:s)?)\\//i.test(l.url)) console.log(`[DOC-QUEUE] ${source.source_name} depth=${r.depth+1} title=${trunc(l.text,120)} url=${l.url}`);
+          push(l.url,l.text,r.depth+1,false);
+        }
       }
     }catch(e){if(r.isRoot){errors++;state.errors++;}else{warnings++;state.warnings++;}}
   }
