@@ -347,7 +347,7 @@ async function processSource(source,run,state){
       }
       if(type==="HTML"&&r.depth<st.depth){
         for(const l of links.filter(crawlable).sort((a,b)=>linkRank(b)-linkRank(a)).slice(0,CFG.maxLinksPerPage)){
-          if(/\\.pdf(?:$|[?#])|\\/(?:uploads?|documents?|download(?:s)?)\\//i.test(l.url)) console.log(`[DOC-QUEUE] ${source.source_name} depth=${r.depth+1} title=${trunc(l.text,120)} url=${l.url}`);
+          if(/\.pdf(?:$|[?#])|\/(?:uploads?|documents?|download(?:s)?)\//i.test(l.url)) console.log(`[DOC-QUEUE] ${source.source_name} depth=${r.depth+1} title=${trunc(l.text,120)} url=${l.url}`);
           push(l.url,l.text,r.depth+1,false);
         }
       }
