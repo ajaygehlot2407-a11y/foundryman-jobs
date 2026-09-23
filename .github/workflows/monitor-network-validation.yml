@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - ".github/workflows/monitor-network-validation.yml"
+      - "scripts/monitor-v11.mjs"
 
 permissions:
   contents: read
