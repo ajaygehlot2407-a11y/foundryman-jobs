@@ -230,11 +230,11 @@ function parseHtml(raw,base){
 }
 
 function sitemapCandidates(xml,base){
-  const out=[],seen=new Set(),re=/<(?:loc)>([\\s\\S]*?)<\\/(?:loc)>/gi;let m;
+  const out=[],seen=new Set(),re=/<(?:loc)>([\s\S]*?)<\/(?:loc)>/gi;let m;
   while((m=re.exec(xml))&&out.length<2500){
     const u=normalize(m[1].trim(),base);if(!http(u)||seen.has(u))continue;
     const v=u.toLowerCase();
-    if(/foundry|moulder|molder|vacanc|recruit|career|job|apprentice|notification|advertisement|iti|\\.pdf|uploads|documents|download|employment/.test(v)){seen.add(u);out.push(u);}
+    if(/foundry|moulder|molder|vacanc|recruit|career|job|apprentice|notification|advertisement|iti|\.pdf|uploads|documents|download|employment/.test(v)){seen.add(u);out.push(u);}
   }
   return out;
 }
