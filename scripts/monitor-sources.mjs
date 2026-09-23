@@ -28,23 +28,34 @@ const CONFIG = {
   USER_AGENT:
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
     "(KHTML, like Gecko) Chrome/131.0 Safari/537.36 " +
-    "FoundrymanJobsMonitor/10.4",
+    "FoundrymanJobsMonitor/10.5",
 
   DISCOVERY_TERMS: [
     "foundryman",
     "foundry man",
+    "foundry-man",
     "moulder",
     "molder",
     "foundry worker",
     "foundry trade",
+    "foundry operator",
+    "foundry technician",
     "foundry",
+    "moulding",
+    "molding",
+    "core maker",
+    "melter",
+    "fettler",
   ],
 
   STRONG_TERMS: [
     "foundryman",
     "foundry man",
+    "foundry-man",
     "moulder",
     "molder",
+    "foundry operator",
+    "foundry technician",
   ],
 
   MEDIUM_TERMS: [
@@ -764,10 +775,17 @@ function shouldCrawlLink(link) {
     "recruitment", "recruit", "vacancy", "vacancies",
     "career", "careers", "job", "jobs", "advertisement",
     "advt", "notification", "engagement", "apprentice",
-    "apprenticeship"
+    "apprenticeship", "application", "employment"
   ];
 
-  return crawlTerms.some((term) => combined.includes(term));
+  const documentLike =
+    /\\.(pdf|doc|docx)(?:$|[?#])/i.test(url) ||
+    url.includes("/uploads/") ||
+    url.includes("/documents/") ||
+    url.includes("/download/") ||
+    url.includes("/downloads/");
+
+  return documentLike || crawlTerms.some((term) => combined.includes(term));
 }
 
 function shouldInspectPage(page) {
@@ -1279,7 +1297,7 @@ async function runWithConcurrency(
 
 async function main() {
   console.log("==============================================");
-  console.log("FOUNDRYMAN VACANCY MONITOR V10.4");
+  console.log("FOUNDRYMAN VACANCY MONITOR V10.5");
   console.log("Fast profile: bounded crawl + timeout-aware fallback");
   console.log("==============================================");
   console.log(
@@ -1336,7 +1354,7 @@ async function main() {
         pages_scanned: 0,
         candidates_found: 0,
         errors_count: 0,
-        notes: "V10.4 curl-status monitor started",
+        notes: "V10.5 PDF-aware discovery monitor started",
       },
       "create monitoring run"
     );
