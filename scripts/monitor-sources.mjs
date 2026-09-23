@@ -12,23 +12,23 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 const REST_URL = `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1`;
 
 const CONFIG = {
-  MAX_PAGES_PER_SOURCE: 6,
-  MAX_LINKS_PER_PAGE: 80,
+  MAX_PAGES_PER_SOURCE: 8,
+  MAX_LINKS_PER_PAGE: 120,
   MAX_PDF_BYTES: 20 * 1024 * 1024,
 
-  SOURCE_TIMEOUT_MS: 30000,
-  PAGE_TIMEOUT_MS: 25000,
-  CURL_TIMEOUT_SECONDS: 35,
+  SOURCE_TIMEOUT_MS: 22000,
+  PAGE_TIMEOUT_MS: 20000,
+  CURL_TIMEOUT_SECONDS: 25,
 
-  SOURCE_RETRIES: 3,
+  SOURCE_RETRIES: 2,
   PAGE_RETRIES: 2,
 
-  CONCURRENCY: 4,
+  CONCURRENCY: 6,
 
   USER_AGENT:
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
     "(KHTML, like Gecko) Chrome/131.0 Safari/537.36 " +
-    "FoundrymanJobsMonitor/10.1",
+    "FoundrymanJobsMonitor/10.2",
 
   DISCOVERY_TERMS: [
     "foundryman",
@@ -124,6 +124,37 @@ function formatError(error) {
   return String(error).slice(0, 1000);
 }
 
+function classifyError(error) {
+  const message = formatError(error).toLowerCase();
+  if (message.includes("timeout") || message.includes("abort")) return "TIMEOUT";
+  if (message.includes("http 401") || message.includes("http 403")) return "HTTP_4XX_AUTH";
+  if (message.includes("http 404")) return "HTTP_404";
+  if (message.includes("http 429")) return "HTTP_429";
+  if (message.includes("http 4")) return "HTTP_4XX";
+  if (message.includes("http 5")) return "HTTP_5XX";
+  if (message.includes("certificate") || message.includes("tls") || message.includes("ssl")) return "TLS_SSL";
+  if (message.includes("enotfound") || message.includes("getaddrinfo")) return "DNS";
+  if (message.includes("econnrefused")) return "CONNECTION_REFUSED";
+  if (message.includes("econnreset")) return "CONNECTION_RESET";
+  if (message.includes("pdftotext")) return "PDF_PARSE";
+  if (message.includes("pdf exceeds")) return "PDF_TOO_LARGE";
+  if (message.includes("curl")) return "CURL";
+  return "OTHER";
+}
+
+function recordError(state, source, url, error, scope = "resource") {
+  const message = formatError(error);
+  const category = classifyError(error);
+  state.errors += 1;
+  state.errorCounts[category] = (state.errorCounts[category] || 0) + 1;
+  const key = source?.source_name || "Unknown source";
+  state.sourceStats[key] = state.sourceStats[key] || { pages: 0, errors: 0, errorMessages: [] };
+  state.sourceStats[key].errors += 1;
+  if (state.sourceStats[key].errorMessages.length < 3) {
+    state.sourceStats[key].errorMessages.push({ category, url: truncate(url || "", 500), message: truncate(message, 500) });
+  }
+  console.log("[ERROR] " + scope + " | " + key + " | " + category + " | " + truncate(url || "", 500) + " | " + truncate(message, 500));
+}
 function isPdfUrl(url = "") {
   const clean = url.split("?")[0].split("#")[0].toLowerCase();
   return clean.endsWith(".pdf");
@@ -589,7 +620,7 @@ async function fetchSupabaseJson(
     Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
     Accept: "application/json",
     "Content-Type": "application/json",
-    "User-Agent": "FoundrymanJobsMonitor/10.1",
+    "User-Agent": "FoundrymanJobsMonitor/10.2",
     ...(options.headers || {}),
   };
 
@@ -1017,12 +1048,13 @@ async function processSource(source, state) {
     source.official_url;
 
   if (!sourceUrl || !isHttpUrl(sourceUrl)) {
-    console.log(
-      `[SKIP] ${source.source_name}: no valid official/recruitment URL`
+    recordError(
+      state,
+      source,
+      sourceUrl,
+      new Error("No valid official/recruitment URL"),
+      "source-config"
     );
-
-    state.errors += 1;
-
     return;
   }
 
@@ -1079,6 +1111,13 @@ async function processSource(source, state) {
   }
 
   let localPages = 0;
+  let localErrors = 0;
+
+  state.sourceStats[source.source_name] = state.sourceStats[source.source_name] || {
+    pages: 0,
+    errors: 0,
+    errorMessages: [],
+  };
 
   while (
     queue.length > 0 &&
@@ -1100,6 +1139,7 @@ async function processSource(source, state) {
       );
 
       localPages += 1;
+      state.sourceStats[source.source_name].pages += 1;
 
       console.log(
         `[PAGE] ${source.source_name}: ${localPages}/${CONFIG.MAX_PAGES_PER_SOURCE} | ${result.finalUrl}`
@@ -1130,25 +1170,33 @@ async function processSource(source, state) {
         }
       }
     } catch (error) {
-      state.errors += 1;
-
-      console.log(
-        `[RESOURCE-ERROR] ${source.source_name} | ${resource.url} | ${formatError(error)}`
+      localErrors += 1;
+      recordError(
+        state,
+        source,
+        resource.url,
+        error,
+        "resource"
       );
-
-      /*
-       * Continue to next page/source.
-       * One broken PDF/page must never kill the entire run.
-       */
     }
   }
+
+  const sourceStat = state.sourceStats[source.source_name];
+  const sourceErrorText = sourceStat?.errorMessages?.length
+    ? sourceStat.errorMessages
+        .map((item) => "[" + item.category + "] " + item.message + " | " + item.url)
+        .join(" || ")
+    : null;
 
   try {
     await supabasePatch(
       `source_registry?id=eq.${encodeURIComponent(source.id)}`,
       {
         last_checked: new Date().toISOString(),
-        last_error: null,
+        last_status: localErrors > 0 ? "Error" : "OK",
+        last_error: sourceErrorText
+          ? truncate(sourceErrorText, 1000)
+          : null,
       },
       `source update: ${source.source_name}`
     );
@@ -1159,7 +1207,7 @@ async function processSource(source, state) {
   }
 
   console.log(
-    `[OK] ${source.source_name}: pages=${localPages}`
+    `[SOURCE-RESULT] ${source.source_name}: pages=${localPages}, errors=${localErrors}`
   );
 }
 
@@ -1206,7 +1254,7 @@ async function runWithConcurrency(
 
 async function main() {
   console.log("==============================================");
-  console.log("FOUNDRYMAN VACANCY MONITOR V10.1");
+  console.log("FOUNDRYMAN VACANCY MONITOR V10.2");
   console.log("==============================================");
   console.log(
     `Max pages/source: ${CONFIG.MAX_PAGES_PER_SOURCE}`
@@ -1262,7 +1310,7 @@ async function main() {
         pages_scanned: 0,
         candidates_found: 0,
         errors_count: 0,
-        notes: "V10.1 production monitor started",
+        notes: "V10.2 diagnostic monitor started",
       },
       "create monitoring run"
     );
@@ -1292,6 +1340,8 @@ async function main() {
     pagesScanned: 0,
     candidatesFound: 0,
     errors: 0,
+    errorCounts: {},
+    sourceStats: {},
     fingerprints: new Set(),
   };
 
@@ -1325,11 +1375,12 @@ async function main() {
           state.errors,
 
         notes:
-          `V10.1 completed. ` +
+          `V10.2 completed. ` +
           `Sources=${sources.length}; ` +
           `Pages=${state.pagesScanned}; ` +
           `Candidates=${state.candidatesFound}; ` +
-          `Errors=${state.errors}`,
+          `Errors=${state.errors}; ` +
+          `ErrorBreakdown=${JSON.stringify(state.errorCounts)}`,
       },
       "finish monitoring run"
     );
@@ -1343,16 +1394,48 @@ async function main() {
   console.log("MONITORING COMPLETED");
   console.log("==============================================");
 
-  console.log(
-    JSON.stringify(
-      {
-        checked: sources.length,
-        pages: state.pagesScanned,
-        candidates: state.candidatesFound,
-        errors: state.errors,
-      }
-    )
-  );
+  const summary = {
+    checked: sources.length,
+    pages: state.pagesScanned,
+    candidates: state.candidatesFound,
+    errors: state.errors,
+    errorBreakdown: state.errorCounts,
+  };
+
+  console.log(JSON.stringify(summary));
+
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (summaryPath) {
+    const fs = await import("node:fs/promises");
+    const breakdown = Object.entries(state.errorCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, value]) => "| " + key + " | " + value + " |")
+      .join("\n") || "| None | 0 |";
+
+    const failedSources = Object.entries(state.sourceStats)
+      .filter(([, value]) => value.errors > 0)
+      .sort((a, b) => b[1].errors - a[1].errors)
+      .slice(0, 20)
+      .map(([name, value]) => {
+        const details = value.errorMessages
+          .map((item) => item.category + ": " + item.message)
+          .join(" ; ");
+        return "| " + name.replace(/\|/g, "/") + " | " + value.pages + " | " + value.errors + " | " + details.replace(/\|/g, "/") + " |";
+      })
+      .join("\n") || "| None | 0 | 0 | |";
+
+    await fs.appendFile(
+      summaryPath,
+      "## Foundryman V10.2 monitor\n\n" +
+      "| Metric | Value |\n|---|---:|\n" +
+      "| Sources checked | " + summary.checked + " |\n" +
+      "| Pages scanned | " + summary.pages + " |\n" +
+      "| Candidates found | " + summary.candidates + " |\n" +
+      "| Errors | " + summary.errors + " |\n\n" +
+      "### Error breakdown\n\n| Type | Count |\n|---|---:|\n" + breakdown + "\n\n" +
+      "### Sources with errors (top 20)\n\n| Source | Pages | Errors | Details |\n|---|---:|---:|---|\n" + failedSources + "\n"
+    );
+  }
 
   console.log("==============================================");
 }
