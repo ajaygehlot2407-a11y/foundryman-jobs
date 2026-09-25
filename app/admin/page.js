@@ -105,7 +105,7 @@ export default function AdminPage() {
     if (data) { await loadRows(); await loadCandidates() }
   }
   async function loadCandidates() {
-    const { data, error } = await sb.from('vacancy_candidates').select('*').eq('review_status', 'Pending Review').order('confidence_score', { ascending: false }).order('discovered_at', { ascending: false }).limit(100)
+    const { data, error } = await sb.from('vacancy_candidates').select('*').eq('review_status', 'Pending Review').eq('candidate_type', 'vacancy').order('confidence_score', { ascending: false }).order('discovered_at', { ascending: false }).limit(100)
     if (error) { setCandidates([]); return }
     const rows = data || []
     const sourceIds = [...new Set(rows.map(r => r.source_id).filter(Boolean))]
