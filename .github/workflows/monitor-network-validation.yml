@@ -1,6 +1,7 @@
 name: Foundryman network validation
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - ".github/workflows/monitor-network-validation.yml"
