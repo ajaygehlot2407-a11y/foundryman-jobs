@@ -294,12 +294,12 @@ async function candidate({sourceId,runId,sourceName,organization="",url,title,te
     return false;
   }
   const canonical=canonicalUrl(url), fp=fingerprint(canonical,title,organization);
-  const existing=await get("vacancy_candidates?select=id&fingerprint=eq."+encodeURIComponent(fp)+"&limit=1","candidate dedupe").catch(e=>{
+  const existing=await get("vacancy_candidates?select=id,title,document_type,review_status,eligibility_status,discovered_at&fingerprint=eq."+encodeURIComponent(fp)+"&limit=1","candidate dedupe").catch(e=>{
     console.log("[CANDIDATE-DEDUPE-ERROR]",sourceName,e.message);
     return [];
   });
   if(Array.isArray(existing)&&existing.length){
-    console.log("[CANDIDATE-SKIP]",sourceName,"reason=duplicate","title="+trunc(title,120),"url="+canonical);
+    console.log("[CANDIDATE-SKIP]",sourceName,"reason=duplicate","existing_id="+(existing[0]?.id||"unknown"),"existing_type="+(existing[0]?.document_type||"unknown"),"existing_review="+(existing[0]?.review_status||"unknown"),"existing_eligibility="+(existing[0]?.eligibility_status||"unknown"),"existing_title="+trunc(existing[0]?.title||"",120),"title="+trunc(title,120),"url="+canonical);
     return false;
   }
   const closed=isClosed(text), contentHash=crypto.createHash("sha256").update(clean(text)).digest("hex");
