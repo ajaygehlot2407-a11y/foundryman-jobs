@@ -284,14 +284,24 @@ async function candidate({sourceId,runId,sourceName,organization="",url,title,te
   const foundryRecruitTrade=CFG.foundry.some(t=>body.includes(t)) && recruit && trade;
   const evidenceHit=matched.length>0;
   if(!evidenceHit)return false;
-  if(CFG.exclude.some(x=>head.includes(x))&&!strongHit)return false;
-  // A direct official document containing strong Foundryman evidence is valid for review,
-  // even when the document is an ITI/curriculum/technical PDF rather than a vacancy.
-  // Keep it in the review queue so verification can classify it instead of silently dropping it.
-  if(!strongHit && !bodyStrongHit && !foundryRecruitTrade && sc<60)return false;
+  if(CFG.exclude.some(x=>head.includes(x))&&!strongHit){
+    console.log("[CANDIDATE-SKIP]",sourceName,"reason=excluded", "title="+trunc(title,120), "url="+canonicalUrl(url));
+    return false;
+  }
+  // Preserve strong official Foundryman evidence for review; weaker matches still need contextual vacancy/trade evidence.
+  if(!strongHit && !bodyStrongHit && !foundryRecruitTrade && sc<60){
+    console.log("[CANDIDATE-SKIP]",sourceName,"reason=weak-evidence","score="+sc,"terms="+matched.join("|"),"title="+trunc(title,120));
+    return false;
+  }
   const canonical=canonicalUrl(url), fp=fingerprint(canonical,title,organization);
-  const existing=await get("vacancy_candidates?select=id&fingerprint=eq."+encodeURIComponent(fp)+"&limit=1","candidate dedupe").catch(()=>[]);
-  if(Array.isArray(existing)&&existing.length)return false;
+  const existing=await get("vacancy_candidates?select=id&fingerprint=eq."+encodeURIComponent(fp)+"&limit=1","candidate dedupe").catch(e=>{
+    console.log("[CANDIDATE-DEDUPE-ERROR]",sourceName,e.message);
+    return [];
+  });
+  if(Array.isArray(existing)&&existing.length){
+    console.log("[CANDIDATE-SKIP]",sourceName,"reason=duplicate","title="+trunc(title,120),"url="+canonical);
+    return false;
+  }
   const closed=isClosed(text), contentHash=crypto.createHash("sha256").update(clean(text)).digest("hex");
   const row={
     source_id:sourceId||null,monitoring_run_id:runId,discovered_at:new Date().toISOString(),
@@ -302,8 +312,18 @@ async function candidate({sourceId,runId,sourceName,organization="",url,title,te
     qualification_text:qualification(text),document_title:trunc(title,500),content_hash:contentHash,
     discovery_method:discoveryMethod,verification_url:verificationUrl||canonical
   };
-  try{await post("vacancy_candidates",row,"candidate "+sourceName);return true;}
-  catch(e){if(String(e).includes("23505")||String(e).toLowerCase().includes("duplicate"))return false;console.log("[CANDIDATE-ERROR]",sourceName,e.message);return false;}
+  try{
+    await post("vacancy_candidates",row,"candidate "+sourceName);
+    console.log("[CANDIDATE-INSERT]",sourceName,"score="+sc,"closed="+closed,"type="+documentType,"title="+trunc(title,120),"url="+canonical);
+    return true;
+  }catch(e){
+    if(String(e).includes("23505")||String(e).toLowerCase().includes("duplicate")){
+      console.log("[CANDIDATE-SKIP]",sourceName,"reason=insert-duplicate","title="+trunc(title,120),"url="+canonical);
+      return false;
+    }
+    console.log("[CANDIDATE-ERROR]",sourceName,e.message);
+    return false;
+  }}
 }
 
 function strategy(source){
