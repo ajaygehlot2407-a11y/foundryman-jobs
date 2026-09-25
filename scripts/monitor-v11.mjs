@@ -323,7 +323,7 @@ async function candidate({sourceId,runId,sourceName,organization="",url,title,te
     }
     console.log("[CANDIDATE-ERROR]",sourceName,e.message);
     return false;
-  }}
+  }
 }
 
 function strategy(source){
