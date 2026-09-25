@@ -35,3 +35,12 @@ on public.foundryman_reference_evidence
 for select
 to authenticated
 using (public.is_admin());
+
+
+-- Explicitly classify vacancy-candidate records; historical reference records are retained but hidden from the vacancy queue.
+alter table public.vacancy_candidates add column if not exists candidate_type text not null default 'vacancy';
+create index if not exists idx_vacancy_candidates_type_review on public.vacancy_candidates(candidate_type, review_status);
+update public.vacancy_candidates
+set candidate_type='reference'
+where lower(coalesce(title,'')) like '%final_model_iti%'
+   or lower(coalesce(document_type,'')) in ('curriculum','syllabus','model iti','trade reference');
