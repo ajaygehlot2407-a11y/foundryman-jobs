@@ -276,6 +276,26 @@ function crawlable(l){
   return /foundry|moulder|molder|recruit|vacanc|career|job|apprentice|notification|advertisement|iti|\.pdf|uploads|documents|download|sites\/default\/files|wp-content\/uploads/.test(v);
 }
 
+async function recordReferenceEvidence({sourceId,runId,sourceName,url,title,text,documentType,discoveryMethod,verificationUrl}){
+  const canonical=canonicalUrl(url), matched=termsIn(title+" "+url+" "+text);
+  const contentHash=crypto.createHash("sha256").update(clean(text)).digest("hex");
+  const row={
+    source_id:sourceId||null,monitoring_run_id:runId,discovered_at:new Date().toISOString(),
+    source_name:sourceName,title:trunc(title,500)||sourceName,url:canonical,
+    document_type:documentType,matched_keywords:matched.join(", "),
+    matched_context:context(text),content_hash:contentHash,
+    discovery_method:discoveryMethod,verification_url:verificationUrl||canonical
+  };
+  try{
+    await post("foundryman_reference_evidence",row,"reference evidence "+sourceName);
+    console.log("[REFERENCE-INSERT]",sourceName,"type="+documentType,"title="+trunc(title,120),"url="+canonical);
+  }catch(e){
+    if(String(e).includes("23505")||String(e).toLowerCase().includes("duplicate"))
+      console.log("[REFERENCE-SKIP]",sourceName,"reason=duplicate","title="+trunc(title,120));
+    else console.log("[REFERENCE-ERROR]",sourceName,e.message);
+  }
+}
+
 async function candidate({sourceId,runId,sourceName,organization="",url,title,text,documentType,status,discoveryMethod,verificationUrl}){
   const matched=termsIn(title+" "+url+" "+text), head=(clean(title)+" "+url).toLowerCase(), body=clean(text).toLowerCase();
   const strongHit=CFG.strong.some(t=>head.includes(t)), recruit=CFG.recruitment.some(t=>body.includes(t)||clean(title).toLowerCase().includes(t));
@@ -284,6 +304,12 @@ async function candidate({sourceId,runId,sourceName,organization="",url,title,te
   const foundryRecruitTrade=CFG.foundry.some(t=>body.includes(t)) && recruit && trade;
   const evidenceHit=matched.length>0;
   if(!evidenceHit)return false;
+  const vacancyEvidence=/(online application|apply online|last date|closing date|number of vacancies|no\. of vacancies|vacancies?\s*[:=]|essential qualification|educational qualification|walk[- ]?in interview|selection process|application fee|how to apply|engagement of|recruitment to the post|post\s+of\s+|posts?\s*[:=])/i.test(clean(title+" "+text));
+  if(!vacancyEvidence){
+    await recordReferenceEvidence({sourceId,runId,sourceName,url,title,text,documentType,discoveryMethod,verificationUrl});
+    console.log("[CANDIDATE-SKIP]",sourceName,"reason=reference-document","title="+trunc(title,120));
+    return false;
+  }
   if(CFG.exclude.some(x=>head.includes(x))&&!strongHit){
     console.log("[CANDIDATE-SKIP]",sourceName,"reason=excluded", "title="+trunc(title,120), "url="+canonicalUrl(url));
     return false;
