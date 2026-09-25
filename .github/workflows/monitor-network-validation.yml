@@ -1,4 +1,5 @@
 name: Foundryman network validation
+# Controlled classifier validation
 
 on:
   workflow_dispatch:
