@@ -334,7 +334,7 @@ async function candidate({sourceId,runId,sourceName,organization="",url,title,te
     title:trunc(title,500)||sourceName||"Foundryman-related opportunity",url:canonical,
     matched_keywords:matched.join(", "),snippet:context(text)||trunc(text,1000),
     source_status:status,eligibility_status:closed?"Closed/Expired":"Needs Verification",review_status:"Pending Review",fingerprint:fp,
-    document_type:documentType,matched_context:context(text),confidence_score:sc,deadline_text:deadline(text),
+    document_type:documentType,candidate_type:"vacancy",matched_context:context(text),confidence_score:sc,deadline_text:deadline(text),
     qualification_text:qualification(text),document_title:trunc(title,500),content_hash:contentHash,
     discovery_method:discoveryMethod,verification_url:verificationUrl||canonical
   };
