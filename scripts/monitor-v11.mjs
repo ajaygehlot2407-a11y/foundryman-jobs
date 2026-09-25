@@ -270,6 +270,7 @@ function linkRank(l){
   if(/career|job|employment|view|details/.test(v))n+=15;
   return n;
 }
+function officialHost(h){ return /(?:^|\.)(?:gov\.in|nic\.in|ac\.in|edu\.in|org\.in)$/i.test(String(h||"")); }
 function crawlable(l){
   const v=(clean(l.text)+" "+l.url).toLowerCase();
   if(CFG.exclude.some(x=>v.includes(x)))return false;
@@ -365,8 +366,9 @@ async function processSource(source,run,state){
   const urls=[...(Array.isArray(source.alternate_urls)?source.alternate_urls:[]),source.recruitment_url,source.official_url].filter((u,i,a)=>http(u)&&a.indexOf(u)===i);
   if(!urls.length){state.errors++;return;}
   const st=strategy(source), q=[],seen=new Set(),queued=new Set(),hosts=new Set(urls.map(host)); 
-  const push=(url,title="",depth=0,isRoot=false)=>{if(!url||!http(url)||queued.has(url)||seen.has(url))return;const h=host(url);if(![...hosts].some(x=>h===x||h.endsWith("."+x)||x.endsWith("."+h)))return;queued.add(url);q.push({url,title,depth,isRoot});};
+  const push=(url,title="",depth=0,isRoot=false,allowExternal=false)=>{if(!url||!http(url)||queued.has(url)||seen.has(url))return;const h=host(url);const sameHost=[...hosts].some(x=>h===x||h.endsWith("."+x)||x.endsWith("."+h));if(!sameHost&&!(!isRoot&&allowExternal&&officialHost(h)))return;queued.add(url);q.push({url,title,depth,isRoot});};
   urls.forEach(u=>push(u,"Recruitment",0,true));
+  let externalOfficialTargets=0;
   try{
     const sitemapUrls=await discoverSitemaps(urls);
     for(const u of sitemapUrls)push(u,"sitemap document",1,false);
@@ -399,7 +401,14 @@ async function processSource(source,run,state){
       if(type==="HTML"&&r.depth<st.depth){
         for(const l of links.filter(crawlable).sort((a,b)=>linkRank(b)-linkRank(a)).slice(0,CFG.maxLinksPerPage)){
           if(/\.pdf(?:$|[?#])|\/(?:uploads?|documents?|download(?:s)?)\//i.test(l.url)) console.log(`[DOC-QUEUE] ${source.source_name} depth=${r.depth+1} title=${trunc(l.text,120)} url=${l.url}`);
-          push(l.url,l.text,r.depth+1,false);
+          const lh=host(l.url);
+          const external=!([...hosts].some(x=>lh===x||lh.endsWith("."+x)||x.endsWith("."+lh)));
+          const relevantExternal=external&&officialHost(lh)&&/(recruit|vacanc|career|job|apprentice|notification|advertisement|iti|foundry|moulder|molder|apply|employment)/i.test(l.text+" "+l.url);
+          if(relevantExternal&&externalOfficialTargets<12){
+            externalOfficialTargets++;
+            console.log(`[EXTERNAL-OFFICIAL] ${source.source_name} target=${l.url} label=${trunc(l.text,100)}`);
+            push(l.url,l.text,r.depth+1,false,true);
+          }else if(!external)push(l.url,l.text,r.depth+1,false);
         }
       }
     }catch(e){if(r.isRoot){errors++;state.errors++;}else{warnings++;state.warnings++;}}
